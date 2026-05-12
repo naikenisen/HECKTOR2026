@@ -1,12 +1,12 @@
 # HECKTOR 2026 
 
-### Aproches précédentes
+## Aproches précédentes
 - Les trois tâches du challenge (segmentation, staging, pronostic) sont **complètement isolées** : aucune information ne circule entre elles.
 - L'image est dégradée à 96³, sans information sur la localisation tumorale.
 - Pas d'utilisation des masques de segmentation pour le pronostic.
 ---
 
-### Pipeline précédente pour la prédiction de la survie
+## Pipeline précédente pour la prédiction de la survie
 
 ```
 CT+PET (2 ch, 96³)              Clinical (clin_dim)
@@ -39,7 +39,7 @@ CT+PET (2 ch, 96³)              Clinical (clin_dim)
                   risk_score final
 ```
 
-
+## Consignes 2026
 Participants are invited to develop a multimodal pipeline leveraging FDG PET, CT, and clinical data to:
 
     Segment primary tumors and lymph nodes
@@ -48,34 +48,13 @@ Participants are invited to develop a multimodal pipeline leveraging FDG PET, CT
 
 This unified task reflects a realistic clinical workflow, integrating diagnosis, staging, and prognosis into a single framework.
 
-Multi-Task Learning
-Pretrained SegMamba model + LoRA
-
-
-
-Backbones Image : Modèles Mamba 3D (pré-entraînés sur des centaines de milliers de scanners) congelés + LoRA.
-
-Backbone Clinique : Un Tabular Transformer (pour traiter l'âge, le sexe, le stade comme des tokens textuels) plutôt qu'un vieux MLP.
-
-Tâches Auxiliaires : Le réseau est forcé de prédire le masque de segmentation et le statut HPV/Stade T pour s'assurer qu'il "regarde" la bonne chose.
-
-Module de Fusion : Un bloc de Cross-Attention qui fait dialoguer les tokens images et cliniques.
-
-Tête de Survie : Un modèle en temps discret (comme DeepHit) plutôt qu'un modèle de Cox continu, pour mieux modéliser les risques non proportionnels.
-
-End-to-End Multitask
-Warm-up
-rétropropagation du gradient de survie à travers les tâches intermédiaires
-
-
-### Pipeline 2026 pour la prédiction de la survie
-
+## Pipeline 2026 pour la prédiction de la survie par End-to-End Multitask Learning
 CT+PET (2 canaux, 128³ ou 256³)
         │
         ▼
 ┌─────────────────────────────────┐
-│SegMamba Encoder Pré-entraîné SSL│ 
-│      (Poids gelés + LoRA)       │ 
+│SegMamba Encoder Pré-entraîné SSL│
+│      (Poids gelés + LoRA)       │
 └─────────────────┬───────────────┘
                   │
                   ▼
@@ -84,39 +63,97 @@ CT+PET (2 canaux, 128³ ou 256³)
   ┌───────────────┼───────────────┐
   │               │               │
   ▼               ▼               ▼
-Décodeur       T-Head          N-Head         
-(Mamba)        (Linear)        (Linear)       
-  │               │               │               
-  ▼               ▼               ▼               
-Masque          Logits T        Logits N      
-  │               │               │               
-  │ L_Seg         │ L_T           │ L_N           
-  │               │               │               
-  │               └───────┬───────┘                      
-  │                       │                              ┌─────────────────────┐
-  │                       │                              │ Données Cliniques   │
-  │                       │                              │ (Âge, Sexe, Poids,  │
-  │                       │                              │  **Statut HPV**)    │
-  │                       │                              └─────────┬───────────┘
-  │                       │                                        │
-  |                       |                              Tabular Transformer
-  │                       ▼                                        ▼
-  │               ┌────────────────────────────────────────────────────────┐
-  └──────────────►│                Cross-Attention Fusion                  │
-                  │  Queries : Tokens Cliniques (contenant l'HPV), T, N    │
-                  │  Keys/Values : Bottleneck z + Masque (L'image)         │
-                  └───────────────────────┬────────────────────────────────┘
-                                          │
-                                          ▼
-                            Tête de Survie (Discrete-Time)
-                                          │
-                                          ▼
-                             Risk Probabilities ──► L_Surv (DeepHit)
+Décodeur       T-Head          N-Head
+(Mamba)        (GAP+Linear)    (GAP+Linear)
+  │               │               │
+  ▼               ▼               ▼
+Masque          Logits T        Logits N
+(B,1,D,H,W)    (B, 4)          (B, 4)
+  │               │               │
+  │  L_Seg        │  L_T          │  L_N
+  │  (Dice+Focal) │  (CrossEnt)   │  (CrossEnt)
+  │               │               │
+  │               └───────┬───────┘
+  │                       │
+  │               Projection linéaire
+  │               nn.Linear(8, d_model)
+  │               token_tn (B, 1, d_model)
+  │                       │                    ┌──────────────────────────┐
+  │                       │                    │ Données Cliniques (B, 7) │
+  │                       │                    │ Âge, Sexe, Tabac,        │
+  │                       │                    │ Alcool, Perf., M-stage,  │
+  │                       │                    │ Traitement               │
+  │                       │                    └────────────┬─────────────┘
+  │                       │                                 │
+  │                       │                    Tabular Transformer
+  │                       │                    (embedding par feature
+  │                       │                     + self-attention)
+  │                       │                    token_clin (B, 1, d_model)
+  │                       │                                 │
+  │                       ▼                                 ▼
+  │        ┌──────────────────────────────────────────────────────────┐
+  │        │              Cross-Attention Fusion                      │
+  │        │                                                          │
+  │        │  Q (B, 3, d_model) :                                     │
+  │        │  torch.cat([CLS token, token_clin, token_tn], dim=1)     │
+  │        │                                                          │
+  │        │  K / V (B, N+M, d_model) :                               │
+  │        │  torch.cat([Bottleneck z (flatten), Masque (flatten)])   │
+  │        │                                                          │
+  │        │  → nn.MultiheadAttention(Q, KV, KV)                      │
+  │        │  → CLS token enrichi (B, d_model)                        │
+  └───────►│                                                          │
+           └──────────────────────────┬───────────────────────────────┘
+                                      │
+                                      ▼
+                         Tête de Survie (Discrete-Time)
+                         nn.Linear(d_model→256→T)
+                         + softmax sur T intervalles
+                                      │
+                                      ▼
+                          Risk Probabilities (B, T) ──► L_Surv (DeepHit)
 
-========================================================================================
-Fonction de perte totale (End-to-End) :
-L_Total = w₁*L_Seg + w₂*L_T + w₃*L_N + w₄*L_Surv
+═══════════════════════════════════════════════════════════════════════════════
 
-* utilisation d'un Warm-up pour la segmentation
-* Les gradients de toutes les pertes remontent jusqu'au Bottleneck.
-* Les poids dynamiques (w) sont ajustés automatiquement par incertitude (Uncertainty Weighting).
+FONCTION DE PERTE TOTALE (End-to-End) :
+
+  L_Total = w₁·L_Seg + w₂·L_T + w₃·L_N + w₄·L_Surv
+
+  • Poids dynamiques (wᵢ) ajustés automatiquement par Uncertainty Weighting
+  • Les gradients de toutes les pertes remontent jusqu'au Bottleneck
+  • Rétropropagation de L_Surv via la cross-attention → Bottleneck
+  • Warm-up segmentation avant entraînement multitâche complet
+
+═══════════════════════════════════════════════════════════════════════════════
+
+SORTIES CLINIQUES — Rapport généré par patient
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    RAPPORT PATIENT                              │
+  │                                                                 │
+  │  1. SEGMENTATION                                                │
+  │     • Masque tumoral 3D (tumeur primaire + ganglions)           │
+  │     • Visualisation superposée sur CT/PET                       │
+  │     • Volume tumoral (cm³), volume ganglionnaire (cm³)          │
+  │                                                                 │
+  │  2. STAGING TN                                                  │
+  │     • T-stage prédit : T1 / T2 / T3 / T4                        │
+  │       avec probabilités : [0.05, 0.72, 0.18, 0.05]             │
+  │     • N-stage prédit : N0 / N1 / N2 / N3                        │
+  │       avec probabilités : [0.10, 0.65, 0.20, 0.05]             │
+  │                                                                 │
+  │  3. PRONOSTIC DE SURVIE                                         │
+  │     • C-index (évaluation de la discrimination)                 │
+  │     • Courbe de risque sur T intervalles de temps :             │
+  │                                                                 │
+  │       Risque de récidive (%)                                    │
+  │       40% │         ╭──────                                     │
+  │       30% │      ╭──╯                                           │
+  │       20% │   ╭──╯                                              │
+  │       10% │╭──╯                                                 │
+  │        0% └──────────────────────── Temps                      │
+  │              6m  12m  18m  24m  36m                             │
+  │                                                                 │
+  │     • Probabilité cumulée de récidive à 1 an : XX%             │
+  │     • Probabilité cumulée de récidive à 2 ans : XX%            │
+  └─────────────────────────────────────────────────────────────────┘
