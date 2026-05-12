@@ -56,10 +56,7 @@ CT+PET (2 canaux, 128³ ou 256³)
         ▼
 ┌─────────────────────────────────┐
  SegResNet - vista3d.pt
- SwinUNETR - SSL sur 5050 CTs 
-
               ou
-
  SegMamba Encoder Pré-entraîné SSL
 │      (Poids gelés + LoRA)       │
 └─────────────────┬───────────────┘
