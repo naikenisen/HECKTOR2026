@@ -16,8 +16,6 @@ from monai.transforms import (
 )
 from monai.networks.nets import resnet18
 
-from icare.survival import BaggedIcareSurvival
-
 # =============================================================================
 # Configuration and Constants
 # =============================================================================
@@ -270,264 +268,117 @@ class FusedFeatureExtractor(nn.Module):
         return fused_features
 
 class HecktorSurvivalModel:
-    """
-    Complete system that jointly trains feature extractor and BaggedIcareSurvival.
-    Uses iterative optimization to improve both components together.
-    """
-    
+    """Trains FusedFeatureExtractor end-to-end with DeepHit + contrastive loss."""
+
     def __init__(self, clinical_feature_dim, device, feature_dim=128):
         self.device = device
         self.feature_dim = feature_dim
         self.clinical_feature_dim = clinical_feature_dim
-        
-        # Initialize feature extractor
+
         self.feature_extractor = FusedFeatureExtractor(
             clinical_feature_dim, feature_dim
         ).to(device)
-        
-        # BaggedIcareSurvival model (will be initialized during training)
-        self.icare_model = None
-        
-        # Training components
-        self.optimizer = optim.Adam(self.feature_extractor.parameters(), lr=1e-3, weight_decay=1e-5)
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='max', factor=0.5, patience=3
+
+        self.optimizer = optim.Adam(
+            self.feature_extractor.parameters(), lr=1e-3, weight_decay=1e-5
         )
-        
-        # Loss functions
-        self.survival_loss = DeepHitLoss(ranking_weight=0.3)
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='max', factor=0.5, patience=5
+        )
+
+        self.survival_loss   = DeepHitLoss(ranking_weight=0.3)
         self.contrastive_loss = SurvivalContrastiveLoss(margin=2.0, temperature=0.1)
-        
-        # Training state
-        self.best_c_index = 0.0
-        self.best_feature_state = None
-        self.best_icare_model = None
-        
-    def extract_features_and_targets(self, data_loader):
-        """Extract features using current feature extractor."""
+
+        self.best_c_index      = 0.0
+        self.best_model_state  = None
+
+    def _train_epoch(self, train_loader):
+        self.feature_extractor.train()
+        total_loss, batch_count = 0.0, 0
+
+        for images, clinical, times, events in tqdm(train_loader, desc="  batches", leave=False):
+            images, clinical = images.to(self.device), clinical.to(self.device)
+            times,  events   = times.to(self.device),  events.to(self.device)
+
+            self.optimizer.zero_grad()
+            features, risk_scores = self.feature_extractor(images, clinical, return_risk=True)
+
+            loss = (self.survival_loss(risk_scores, times, events)
+                    + 0.1 * self.contrastive_loss(features, times, events))
+
+            if not torch.isnan(loss):
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.feature_extractor.parameters(), 1.0)
+                self.optimizer.step()
+                total_loss += loss.item()
+                batch_count += 1
+
+        return total_loss / max(batch_count, 1)
+
+    def evaluate(self, data_loader):
+        """Return C-index from risk_head predictions."""
         self.feature_extractor.eval()
-        all_features = []
-        all_times = []
-        all_events = []
-        
+        all_risks, all_times, all_events = [], [], []
+
         with torch.no_grad():
             for images, clinical, times, events in data_loader:
                 images, clinical = images.to(self.device), clinical.to(self.device)
-                features = self.feature_extractor(images, clinical)
-                
-                all_features.append(features.cpu().numpy())
+                _, risk_scores = self.feature_extractor(images, clinical, return_risk=True)
+                all_risks.extend(risk_scores.cpu().numpy())
                 all_times.extend(times.numpy())
                 all_events.extend(events.numpy())
-        
-        feature_matrix = np.vstack(all_features)
-        time_array = np.array(all_times)
-        event_array = np.array(all_events)
-        
-        # Create structured array for BaggedIcareSurvival
-        # Format: [(event, time), (event, time), ...]
-        # Note: BaggedIcareSurvival expects event as first field, time as second
-        survival_dtype = [('event', bool), ('time', float)]
-        survival_outcomes = np.array(
-            list(zip(event_array.astype(bool), time_array.astype(float))), 
-            dtype=survival_dtype
-        )
-        
-        return feature_matrix, survival_outcomes
-    
 
-    def train_feature_extractor_epoch(self, train_loader):
-        """Train feature extractor for one epoch using survival losses."""
-        self.feature_extractor.train()
-        total_loss = 0
-        batch_count = 0
+        risks  = np.array(all_risks)
+        times  = np.array(all_times)
+        events = np.array(all_events)
 
-        epoch_pbar = tqdm(train_loader, desc="Training feature extractor", leave=False)
-        
-        for images, clinical, times, events in epoch_pbar:
-            images, clinical = images.to(self.device), clinical.to(self.device)
-            times, events = times.to(self.device), events.to(self.device)
-            
-            self.optimizer.zero_grad()
-            
-            # Get features and risk scores
-            features, risk_scores = self.feature_extractor(
-                images, clinical, return_risk=True
-            )
-            
-            # Compute combined loss
-            survival_loss = self.survival_loss(risk_scores, times, events)
-            contrastive_loss = self.contrastive_loss(features, times, events)
-            
-            total_loss_batch = survival_loss + 0.1 * contrastive_loss
-            
-            if not torch.isnan(total_loss_batch):
-                total_loss_batch.backward()
-                torch.nn.utils.clip_grad_norm_(self.feature_extractor.parameters(), max_norm=1.0)
-                self.optimizer.step()
-                total_loss += total_loss_batch.item()
-                batch_count += 1
+        if events.sum() == 0:
+            return 0.5
+        return concordance_index(times, -risks, events)
 
-            epoch_pbar.set_postfix(loss=total_loss_batch.item())
-        
-        return total_loss / max(batch_count, 1)
-    
-    def train_icare_model(self, train_loader):
-        """Train or retrain BaggedIcareSurvival model with current features."""        
-        # Extract features using current feature extractor
-        X_train, y_train = self.extract_features_and_targets(train_loader)
-        
-        
-        try:
-            # Initialize BaggedIcareSurvival with conservative parameters
-            # Check what parameters are actually supported
-            self.icare_model = BaggedIcareSurvival(
-                aggregation_method='median',
-                n_jobs=-1,
-                random_state=RANDOM_SEED
-            )
-            
-            self.icare_model.fit(X_train, y_train)
-            
-        except Exception as e:
-            print(f"BaggedIcareSurvival training failed: {e}")
-            raise e
-    
-    def evaluate_system(self, data_loader):
-        """Evaluate the complete system."""
-        try:
-            # Extract features and get predictions
-            X_test, y_test = self.extract_features_and_targets(data_loader)
-            predictions = self.icare_model.predict(X_test)
-            
-            # Extract time and event from structured array for concordance calculation
-            times = y_test['time']
-            events = y_test['event'].astype(int)
-            
-            # Calculate C-index (negative predictions because icare gives risk scores)
-            c_index = concordance_index(times, -predictions, events)
-            return c_index
-            
-        except Exception as e:
-            print(f"System evaluation failed: {e}")
-            raise e
-    
-    def fit(self, train_loader, val_loader, num_iterations=20, feature_epochs_per_iteration=5):
-        """
-        Train the complete system using iterative optimization.
-        
-        Args:
-            train_loader: Training data loader
-            val_loader: Validation data loader  
-            num_iterations: Number of alternating training iterations
-            feature_epochs_per_iteration: Feature extractor epochs per iteration
-        """
-        print(f"Training: {num_iterations} iterations × {feature_epochs_per_iteration} epochs")
-        
-        # Initial BaggedIcareSurvival training
-        self.train_icare_model(train_loader)
-        initial_c_index = self.evaluate_system(val_loader)
-        print(f"Initial validation C-index: {initial_c_index:.4f}")
-        
-        self.best_c_index = initial_c_index
-        self.best_feature_state = self.feature_extractor.state_dict().copy()
-        self.best_icare_model = pickle.loads(pickle.dumps(self.icare_model))
-        
-        # Iterative joint training
-        for iteration in tqdm(range(num_iterations), desc="Training iterations"):
-            print(f"\n=== Iteration {iteration + 1}/{num_iterations} ===")
-            
-            # Train feature extractor for several epochs
-            print("Training feature extractor...")
-            epoch_losses = []
-            
-            epoch_pbar = tqdm(range(feature_epochs_per_iteration), desc="Feature extractor epochs", leave=False)
-            #add loss in tqdm
-            for epoch in epoch_pbar:
-                avg_loss = self.train_feature_extractor_epoch(train_loader)
-                epoch_losses.append(avg_loss)   
-            
-            # Retrain BaggedIcareSurvival with updated features
-            self.train_icare_model(train_loader)
-            
-            # Evaluate complete system
-            current_c_index = self.evaluate_system(val_loader)
-            print(f"Validation C-index: {current_c_index:.4f}")
-            
-            # Update learning rate based on performance
-            self.scheduler.step(current_c_index)
-            
-            # Save best model
-            if current_c_index > self.best_c_index:
-                print(f"New best C-index: {current_c_index:.4f} (improvement: +{current_c_index - self.best_c_index:.4f})")
-                self.best_c_index = current_c_index
-                self.best_feature_state = self.feature_extractor.state_dict().copy()
-                self.best_icare_model = pickle.loads(pickle.dumps(self.icare_model))
-            else:
-                print(f"No improvement (best: {self.best_c_index:.4f})")
+    def fit(self, train_loader, val_loader, num_epochs=100):
+        print(f"Training for {num_epochs} epochs")
 
-            #update tqdm with loss, c-index and best c-index
-            epoch_pbar.set_postfix(loss=avg_loss, c_index=current_c_index, best_c_index=self.best_c_index)
-        
-        # Load best models
-        print(f"\nTraining complete! Best validation C-index: {self.best_c_index:.4f}")
-        self.feature_extractor.load_state_dict(self.best_feature_state)
-        self.icare_model = self.best_icare_model
-    
+        for epoch in tqdm(range(num_epochs), desc="Epochs"):
+            avg_loss = self._train_epoch(train_loader)
+            c_index  = self.evaluate(val_loader)
+            self.scheduler.step(c_index)
+
+            print(f"  Epoch {epoch + 1:3d} | loss {avg_loss:.4f} | val C-index {c_index:.4f}")
+
+            if c_index > self.best_c_index:
+                self.best_c_index     = c_index
+                self.best_model_state = {k: v.clone() for k, v in
+                                         self.feature_extractor.state_dict().items()}
+
+        print(f"\nTraining complete. Best val C-index: {self.best_c_index:.4f}")
+        if self.best_model_state is not None:
+            self.feature_extractor.load_state_dict(self.best_model_state)
+
     def predict(self, data_loader):
-        """Generate predictions using the trained system."""
-        if self.icare_model is None:
-            raise ValueError("System must be trained before making predictions")
-        
-        X_test, y_test = self.extract_features_and_targets(data_loader)
-        predictions = self.icare_model.predict(X_test)
-        
-        # Extract time and event from structured array
-        times = y_test['time']
-        events = y_test['event'].astype(int)
-        
-        return predictions, times, events  # predictions, times, events
-    
+        """Return (risk_scores, times, events) arrays."""
+        self.feature_extractor.eval()
+        all_risks, all_times, all_events = [], [], []
+
+        with torch.no_grad():
+            for images, clinical, times, events in data_loader:
+                images, clinical = images.to(self.device), clinical.to(self.device)
+                _, risk_scores = self.feature_extractor(images, clinical, return_risk=True)
+                all_risks.extend(risk_scores.cpu().numpy())
+                all_times.extend(times.numpy())
+                all_events.extend(events.numpy())
+
+        return np.array(all_risks), np.array(all_times), np.array(all_events)
+
     def save_model(self, filepath_prefix):
-        """Save the complete trained system with config for inference."""
-        # Save feature extractor
         torch.save(self.feature_extractor.state_dict(), f"{filepath_prefix}_feature_extractor.pt")
-        
-        # Save BaggedIcareSurvival model
-        with open(f"{filepath_prefix}_icare_model.pkl", 'wb') as f:
-            pickle.dump(self.icare_model, f)
-        
-        # Save model configuration for inference
-        config = {
-            'clinical_feature_dim': self.clinical_feature_dim,
-            'feature_dim': self.feature_dim,
-            'model_type': 'HecktorSurvivalModel',
-            'image_size': IMAGE_SIZE,
-            'best_c_index': float(self.best_c_index)
-        }
-        with open(f"{filepath_prefix}_config.json", 'w') as f:
-            json.dump(config, f, indent=2)
-        
-        print(f"Model saved with prefix: {filepath_prefix}")
-    
+        print(f"Model saved: {filepath_prefix}_feature_extractor.pt")
+
     def load_model(self, filepath_prefix):
-        """Load a previously trained system."""
-        # Load feature extractor
         self.feature_extractor.load_state_dict(
             torch.load(f"{filepath_prefix}_feature_extractor.pt", map_location=self.device)
         )
-        
-        # Load BaggedIcareSurvival model
-        with open(f"{filepath_prefix}_icare_model.pkl", 'rb') as f:
-            self.icare_model = pickle.load(f)
-        
-        # Load config if available
-        config_path = f"{filepath_prefix}_config.json"
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-            print(f"Loaded model with C-index: {config.get('best_c_index', 'unknown')}")
-        
-        print(f"System loaded from prefix: {filepath_prefix}")
+        print(f"Model loaded: {filepath_prefix}_feature_extractor.pt")
 
 # =============================================================================
 # Data Loading Functions (Updated)
@@ -749,26 +600,20 @@ def main():
     clinical_dim = HecktorSurvivalDataset(dataset_cache, pids_train)[0][1].shape[0]
     model = HecktorSurvivalModel(clinical_feature_dim=clinical_dim, device=device, feature_dim=256)
 
-    model.fit(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_iterations=25,
-        feature_epochs_per_iteration=10,
-    )
+    model.fit(train_loader=train_loader, val_loader=val_loader, num_epochs=100)
 
-    val_c_index  = model.evaluate_system(val_loader)
-    test_c_index = model.evaluate_system(test_loader)
+    val_c_index  = model.evaluate(val_loader)
+    test_c_index = model.evaluate(test_loader)
     print(f"\nVal  C-index: {val_c_index:.4f}")
     print(f"Test C-index: {test_c_index:.4f}")
 
     model.save_model("prognosis_logs/final_model")
 
-    # Save test predictions
     test_predictions, test_times, test_events = model.predict(test_loader)
     pd.DataFrame({
-        'patient_id':     pids_test,
-        'risk_score':     test_predictions,
-        'survival_time':  test_times,
+        'patient_id':      pids_test,
+        'risk_score':      test_predictions,
+        'survival_time':   test_times,
         'event_indicator': test_events,
     }).to_csv("prognosis_logs/test_predictions.csv", index=False)
 

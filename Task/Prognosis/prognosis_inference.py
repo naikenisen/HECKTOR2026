@@ -49,11 +49,10 @@ def load_and_preprocess_test_data(csv_path, input_path, clinical_preprocessors_p
     if failed_loads:
         test_df = test_df[~test_df["PatientID"].isin(failed_loads)]
 
-    # Preprocess clinical features using saved preprocessors
-    ALL_CLINICAL_FEATURES  = ["Age", "Gender", "Tobacco Consumption", "Alcohol Consumption",
-                               "Performance Status", "M-stage", "Treatment"]
-    CATEGORICAL_FEATURES   = ["Gender", "Tobacco Consumption", "Alcohol Consumption",
-                               "Performance Status", "M-stage", "Treatment"]
+    ALL_CLINICAL_FEATURES = ["Age", "Gender", "Tobacco Consumption", "Alcohol Consumption",
+                              "Performance Status", "M-stage", "Treatment"]
+    CATEGORICAL_FEATURES  = ["Gender", "Tobacco Consumption", "Alcohol Consumption",
+                              "Performance Status", "M-stage", "Treatment"]
 
     feature_subset = test_df[ALL_CLINICAL_FEATURES].copy()
     age_scaled = clinical_preprocessors['age_scaler'].transform(
@@ -95,19 +94,17 @@ def load_and_preprocess_test_data(csv_path, input_path, clinical_preprocessors_p
     }
 
 
-def run_inference(csv_path, input_path, model_path, icare_model_path,
-                  clinical_preprocessors_path, batch_size=4):
+def run_inference(csv_path, input_path, model_path, clinical_preprocessors_path, batch_size=4):
     set_random_seed(RANDOM_SEED)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    test_data = load_and_preprocess_test_data(csv_path, input_path, clinical_preprocessors_path)
+    test_data   = load_and_preprocess_test_data(csv_path, input_path, clinical_preprocessors_path)
     patient_ids = test_data['patient_ids']
 
-    dataset    = HecktorSurvivalDataset(test_data, patient_ids)
-    loader     = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    dataset      = HecktorSurvivalDataset(test_data, patient_ids)
+    loader       = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     clinical_dim = dataset[0][1].shape[0]
 
-    # Load feature extractor
     feature_extractor = FusedFeatureExtractor(
         clinical_feature_dim=clinical_dim,
         feature_output_dim=128,
@@ -115,21 +112,15 @@ def run_inference(csv_path, input_path, model_path, icare_model_path,
     feature_extractor.load_state_dict(torch.load(model_path, map_location=device))
     feature_extractor.eval()
 
-    # Load BaggedIcareSurvival
-    with open(icare_model_path, 'rb') as f:
-        icare_model = pickle.load(f)
-
-    # Extract features
-    all_features = []
+    all_risks = []
     with torch.no_grad():
         for images, clinical, *_ in loader:
             images, clinical = images.to(device), clinical.to(device)
-            all_features.append(feature_extractor(images, clinical).cpu().numpy())
-    features = np.vstack(all_features)
+            _, risk_scores = feature_extractor(images, clinical, return_risk=True)
+            all_risks.extend(risk_scores.cpu().numpy())
 
-    predictions = icare_model.predict(features)
+    predictions = np.array(all_risks)
 
-    # Evaluate if survival labels are available
     if test_data['has_survival_data']:
         times  = np.array([test_data['survival_data'][pid]['time']  for pid in patient_ids])
         events = np.array([test_data['survival_data'][pid]['event'] for pid in patient_ids])
@@ -141,18 +132,15 @@ def run_inference(csv_path, input_path, model_path, icare_model_path,
 
 def main():
     parser = argparse.ArgumentParser(description="HECKTOR survival prediction inference")
-    parser.add_argument("--csv",                      required=True)
-    parser.add_argument("--input_path",               required=True)
-    parser.add_argument("--model_path",               required=True,
+    parser.add_argument("--csv",                    required=True)
+    parser.add_argument("--input_path",             required=True)
+    parser.add_argument("--model_path",             required=True,
                         help="Path to feature extractor checkpoint (.pt)")
-    parser.add_argument("--icare_model_path",         required=True,
-                        help="Path to BaggedIcareSurvival pickle (.pkl)")
-    parser.add_argument("--clinical_preprocessors",   required=True)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--clinical_preprocessors", required=True)
+    parser.add_argument("--batch_size", type=int,   default=4)
     args = parser.parse_args()
 
-    for path in [args.csv, args.input_path, args.model_path,
-                 args.icare_model_path, args.clinical_preprocessors]:
+    for path in [args.csv, args.input_path, args.model_path, args.clinical_preprocessors]:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Not found: {path}")
 
@@ -160,7 +148,6 @@ def main():
         csv_path=args.csv,
         input_path=args.input_path,
         model_path=args.model_path,
-        icare_model_path=args.icare_model_path,
         clinical_preprocessors_path=args.clinical_preprocessors,
         batch_size=args.batch_size,
     )
