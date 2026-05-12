@@ -16,8 +16,8 @@ from monai.data import decollate_batch
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import UNet3DConfig, SegResNetConfig, UNETRConfig, SwinUNETRConfig
-from models import UNet3DModel, SegResNetModel, UNETRModel, SwinUNETRModel
+from config import SwinUNETRConfig
+from models import SwinUNETRModel
 from data import get_dataloaders
 from utils.losses import get_loss_function
 from utils.logging import setup_logging
@@ -111,7 +111,7 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train HECKTOR segmentation model")
-    parser.add_argument("--config", type=str, default="unet3d", choices=["unet3d", "segresnet", "unetr", "swinunetr"], help="Model configuration to use")
+    parser.add_argument("--config", type=str, default="swinunetr", choices=["swinunetr"], help="Model configuration to use")
     parser.add_argument("--fold", type=int, default=0, help="Cross-validation fold to use (0-4)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--device", type=str, help="Override device from config (e.g., 'cpu', 'cuda')")
@@ -125,17 +125,7 @@ def main():
     args = parse_args()
     
     # Setup configuration
-    if args.config == "unet3d":
-        # Pass fold directly to config to create proper directory structure
-        config = UNet3DConfig(fold=args.fold)
-    elif args.config == "segresnet":
-        config = SegResNetConfig(fold=args.fold)
-    elif args.config == "unetr":
-        config = UNETRConfig(fold=args.fold)
-    elif args.config == "swinunetr":
-        config = SwinUNETRConfig(fold=args.fold)
-    else:
-        raise ValueError(f"Unknown config: {args.config}")
+    config = SwinUNETRConfig(fold=args.fold)
     
     # Override device if specified
     if args.device:
@@ -159,16 +149,7 @@ def main():
         logger.info(f"Using device: {device}")
 
     # Create model
-    if args.config == "unet3d":
-        model = UNet3DModel(config).to(device)
-    elif args.config == "segresnet":
-        model = SegResNetModel(config).to(device)
-    elif args.config == "unetr":
-        model = UNETRModel(config).to(device)
-    elif args.config == "swinunetr":
-        model = SwinUNETRModel(config).to(device)
-    else:
-        raise ValueError(f"Unknown model type: {args.config}")
+    model = SwinUNETRModel(config).to(device)
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
     
     # Setup data

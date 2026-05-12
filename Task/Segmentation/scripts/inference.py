@@ -14,8 +14,8 @@ sys.path.insert(0, current_dir)
 
 # Import model classes and configs
 try:
-    from models import UNet3DModel, SegResNetModel, UNETRModel, SwinUNETRModel
-    from config import UNet3DConfig, SegResNetConfig, UNETRConfig, SwinUNETRConfig
+    from models import SwinUNETRModel
+    from config import SwinUNETRConfig
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure you're running this script from the Task1 directory")
@@ -72,16 +72,10 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         print(f"Found model config for experiment: {model_config.get('experiment_name', 'unknown')}")
         
         # Create config object from saved dictionary
-        experiment_name = model_config.get('experiment_name', 'unet3d')
+        experiment_name = model_config.get('experiment_name', 'swinunetr')
         
         # Recreate the config object
-        if experiment_name == 'unet3d':
-            config = UNet3DConfig()
-        elif experiment_name == 'segresnet':
-            config = SegResNetConfig()
-        elif experiment_name == 'unetr':
-            config = UNETRConfig()
-        elif experiment_name == 'swinunetr':
+        if experiment_name == 'swinunetr':
             config = SwinUNETRConfig()
         else:
             print(f"Error: Unknown experiment type: {experiment_name}")
@@ -98,14 +92,7 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         print(f"  Spatial size: {config.spatial_size}")
         
         # Create model with the config
-        if experiment_name == 'unet3d':
-            model = UNet3DModel(config)
-        elif experiment_name == 'segresnet':
-            model = SegResNetModel(config)
-        elif experiment_name == 'unetr':
-            model = UNETRModel(config)
-        elif experiment_name == 'swinunetr':
-            model = SwinUNETRModel(config)
+        model = SwinUNETRModel(config)
         
         # Load the state dict
         model.load_state_dict(checkpoint['model_state_dict'])
