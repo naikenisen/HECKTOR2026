@@ -352,3 +352,82 @@ jusqu'aux backbones via la cross-attention
 | **Mode d'entraînement** | 2 étapes alternées | End-to-end multitâche | End-to-end multitâche |
 | **Modèle final survie** | BaggedIcareSurvival | 3 FC layers | FC layers (256→128→1) |
 | **Loss survie** | DeepHit + Contrastive | Cox NLPL | Cox NLPL |
+
+
+
+Participants are invited to develop a multimodal pipeline leveraging FDG PET, CT, and clinical data to:
+
+    Segment primary tumors and lymph nodes
+    Infer radiological TN staging
+    Predict recurrence-free survival
+
+This unified task reflects a realistic clinical workflow, integrating diagnosis, staging, and prognosis into a single framework.
+
+Multi-Task Learning
+Pretrained SegMamba model + LoRA
+
+
+
+Backbones Image : Modèles Mamba 3D (pré-entraînés sur des centaines de milliers de scanners) congelés + LoRA.
+
+Backbone Clinique : Un Tabular Transformer (pour traiter l'âge, le sexe, le stade comme des tokens textuels) plutôt qu'un vieux MLP.
+
+Tâches Auxiliaires : Le réseau est forcé de prédire le masque de segmentation et le statut HPV/Stade T pour s'assurer qu'il "regarde" la bonne chose.
+
+Module de Fusion : Un bloc de Cross-Attention qui fait dialoguer les tokens images et cliniques.
+
+Tête de Survie : Un modèle en temps discret (comme DeepHit) plutôt qu'un modèle de Cox continu, pour mieux modéliser les risques non proportionnels.
+
+End-to-End Multitask
+Warm-up
+rétropropagation du gradient de survie à travers les tâches intermédiaires
+
+
+
+CT+PET (2 canaux, 128³ ou 256³)
+        │
+        ▼
+┌─────────────────────────────────┐
+│        SegMamba Encoder         │ ◄── Pré-entraîné SSL (ex: hecktor_pretrain)
+│      (Poids gelés + LoRA)       │ ◄── Seules les matrices LoRA sont entraînées
+└─────────────────┬───────────────┘
+                  │
+                  ▼
+         Bottleneck (Latent z)
+    (Espace latent riche en radiomique)
+                  │
+  ┌───────────────┼───────────────┬───────────────┐
+  │               │               │               │
+  ▼               ▼               ▼               ▼
+Décodeur       T-Head          N-Head         HPV-Head
+(Mamba/CNN)    (Linear)        (Linear)       (Linear)
+  │               │               │               │
+  ▼               ▼               ▼               ▼
+Masque          Logits T        Logits N       Logits HPV       Données Cliniques (Âge, etc.)
+  │               │               │               │                      │
+  │ L_Seg         │ L_T           │ L_N           │ L_HPV                ▼
+  │               │               │               │               Tabular Transformer / MLP
+  │               │               │               │                      │
+  │               └───────┬───────┴───────┬───────┘                      │
+  │                       │               │                              │
+  │                       ▼               ▼                              ▼
+  │               ┌────────────────────────────────────────────────────────┐
+  └──────────────►│                Cross-Attention Fusion                  │
+                  │  Queries (Enquêteurs) : Tokens Cliniques, T, N, HPV    │
+                  │  Keys/Values (Preuves) : Bottleneck z + Masque         │
+                  └───────────────────────┬────────────────────────────────┘
+                                          │
+                                          ▼
+                            Tête de Survie (Discrete-Time)
+                           (Sorties: 0-6m, 6-12m, 1-2a, 2-5a)
+                                          │
+                                          ▼
+                             Risk Probabilities ──► L_Surv (ex: DeepHit)
+
+
+========================================================================================
+Fonction de perte totale (End-to-End) :
+L_Total = w₁*L_Seg + w₂*L_T + w₃*L_N + w₄*L_HPV + w₅*L_Surv
+
+* Les gradients de toutes les pertes remontent jusqu'au Bottleneck.
+* Les poids dynamiques (w) sont ajustés automatiquement par incertitude (Uncertainty Weighting).
