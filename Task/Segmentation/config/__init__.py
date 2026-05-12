@@ -1,4 +1,3 @@
-from .base_config import BaseConfig
-from .swinunetr_config import SwinUNETRConfig
+from .segresnet_config import SegResNetConfig
 
-__all__ = ['BaseConfig', 'SwinUNETRConfig']
+__all__ = ['SegResNetConfig']

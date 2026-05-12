@@ -1,4 +1,3 @@
-from .base_model import BaseModel
-from .swin_unetr import SwinUNETRModel
+from .segresnet import SegResNetModel
 
-__all__ = ['BaseModel', 'SwinUNETRModel']
+__all__ = ['SegResNetModel']

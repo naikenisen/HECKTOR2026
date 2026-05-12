@@ -16,8 +16,8 @@ from monai.data import decollate_batch
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import SwinUNETRConfig
-from models import SwinUNETRModel
+from config import SegResNetConfig
+from models import SegResNetModel
 from data import get_dataloaders
 from utils.losses import get_loss_function
 from utils.logging import setup_logging
@@ -111,7 +111,7 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train HECKTOR segmentation model")
-    parser.add_argument("--config", type=str, default="swinunetr", choices=["swinunetr"], help="Model configuration to use")
+    parser.add_argument("--config", type=str, default="segresnet", choices=["segresnet"], help="Model configuration to use")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--device", type=str, help="Override device from config (e.g., 'cpu', 'cuda')")
     parser.add_argument("--cuda-device", type=int, default=0, help="CUDA device index")
@@ -124,7 +124,7 @@ def main():
     args = parse_args()
     
     # Setup configuration
-    config = SwinUNETRConfig()
+    config = SegResNetConfig()
     
     # Override device if specified
     if args.device:
@@ -148,7 +148,7 @@ def main():
         logger.info(f"Using device: {device}")
 
     # Create model
-    model = SwinUNETRModel(config).to(device)
+    model = SegResNetModel(config).to(device)
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
     
     # Setup data
