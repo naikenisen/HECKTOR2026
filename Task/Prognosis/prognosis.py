@@ -2,14 +2,12 @@ import os
 import pandas as pd
 import numpy as np
 import torch
-import csv 
 import pickle
 import random
-import json
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from lifelines.utils import concordance_index
 from tqdm import tqdm
@@ -32,7 +30,6 @@ CONCORDANCE_EPSILON = 1e-8
 # Data paths - update these for your environment
 TRAINING_IMAGES_PATH = "../../hecktor2026_training"
 EHR_DATA_PATH = "../../hecktor2026_training/HECKTOR_2026_Training.csv"
-FOLDS_PATH = "./cv_splits_stratified.json"
 
 
 # =============================================================================
@@ -713,220 +710,68 @@ def load_and_cache_dataset(csv_path, image_directories, cache_path="cached_heckt
     return cached_dataset
 
 # =============================================================================
-# Cross-Validation 
-# =============================================================================
-
-def load_cv_folds(json_path):
-    """Load cross-validation folds from JSON."""
-    with open(json_path, 'r') as f:
-        fold_config = json.load(f)
-    print(f"Loaded {fold_config['n_folds']} CV folds from {json_path}")
-    return fold_config
-
-def run_cross_validation(cached_data, folds_json_path=None, batch_size=4, 
-                                  test_proportion=0.2, training_iterations=15, 
-                                  feature_epochs_per_iteration=3):
-    """
-    Run cross-validation using the BaggedIcareSurvival model.
-    """
-    # Setup logging
-    os.makedirs("cv_logs", exist_ok=True)
-    results_path = "cv_logs/cv_results.csv"
-    
-    with open(results_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Fold", "Validation_CIndex", "Test_CIndex"])
-
-    # Prepare data
-    clinical_df = cached_data['dataframe']
-    all_patient_ids = clinical_df["PatientID"].values
-    all_events = clinical_df["Relapse"].values
-    device = setup_device()
-    
-    # Handle fold configuration
-    if folds_json_path and os.path.exists(folds_json_path):
-        fold_config = load_cv_folds(folds_json_path)
-        cv_folds = fold_config['folds']
-        num_folds = fold_config['n_folds']
-        
-        # Set up test set if needed
-        if test_proportion > 0:
-            fold_patient_ids = set()
-            for fold in cv_folds:
-                fold_patient_ids.update(fold['train'])
-                fold_patient_ids.update(fold['val'])
-            
-            remaining_patients = [pid for pid in all_patient_ids if pid not in fold_patient_ids]
-            
-            if len(remaining_patients) > 0:
-                test_patient_ids = np.array(remaining_patients)
-                print(f"Using {len(test_patient_ids)} remaining patients as test set")
-            else:
-                train_val_ids, test_patient_ids, _, _ = train_test_split(
-                    all_patient_ids, all_events, 
-                    test_size=test_proportion, stratify=all_events, random_state=RANDOM_SEED
-                )
-                print(f"Held out {len(test_patient_ids)} patients as test set")
-        else:
-            test_patient_ids = []
-    else:
-        print("Generating stratified CV folds...")
-        train_val_ids, test_patient_ids, train_val_events, _ = train_test_split(
-            all_patient_ids, all_events, 
-            test_size=test_proportion, stratify=all_events, random_state=RANDOM_SEED
-        )
-        
-        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-        cv_folds = []
-        
-        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(train_val_ids, train_val_events)):
-            cv_folds.append({
-                'fold': fold_idx + 1,
-                'train': train_val_ids[train_idx].tolist(),
-                'val': train_val_ids[val_idx].tolist()
-            })
-        
-        num_folds = 5
-
-    # Create test loader if needed
-    if len(test_patient_ids) > 0:
-        test_dataset = HecktorSurvivalDataset(cached_data, test_patient_ids)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    else:
-        test_loader = None
-
-    # Store results
-    validation_c_indices = []
-    test_c_indices = []
-    
-    # Process each fold
-    for fold_info in cv_folds:
-        fold_num = fold_info['fold'] - 1
-        train_pids = [pid for pid in fold_info['train'] if pid in cached_data['images']]
-        val_pids = [pid for pid in fold_info['val'] if pid in cached_data['images']]
-        
-        print(f"\n{'='*60}")
-        print(f"FOLD {fold_num + 1}/{num_folds}")
-        print(f"{'='*60}")
-        print(f"Training patients: {len(train_pids)}")
-        print(f"Validation patients: {len(val_pids)}")
-        
-        # Create datasets and loaders
-        train_dataset = HecktorSurvivalDataset(cached_data, train_pids)
-        val_dataset = HecktorSurvivalDataset(cached_data, val_pids)
-        
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-        
-        # Get clinical feature dimension
-        clinical_dim = train_dataset[0][1].shape[0]
-        
-        # Initialize model
-        model = HecktorSurvivalModel(
-            clinical_feature_dim=clinical_dim,
-            device=device,
-            feature_dim=256
-        )
-        
-        # Train the complete system
-        print(f"Training...")
-        model.fit(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            num_iterations=training_iterations,
-            feature_epochs_per_iteration=feature_epochs_per_iteration
-        )
-        
-        # Final evaluation
-        val_c_index = model.evaluate_system(val_loader)
-        
-        if test_loader:
-            test_c_index = model.evaluate_system(test_loader)
-            test_predictions, test_times, test_events = model.predict(test_loader)
-            eval_patient_ids = test_patient_ids
-        else:
-            test_c_index = val_c_index
-            test_predictions, test_times, test_events = model.predict(val_loader)
-            eval_patient_ids = val_pids
-        
-        # Store results
-        validation_c_indices.append(val_c_index)
-        test_c_indices.append(test_c_index)
-        
-        # Save predictions
-        results_df = pd.DataFrame({
-            'patient_id': eval_patient_ids,
-            'risk_score': test_predictions,
-            'survival_time': test_times,
-            'event_indicator': test_events
-        })
-        results_df.to_csv(f"cv_logs/fold{fold_num}_predictions.csv", index=False)
-        
-        # Save trained system (now includes config)
-        model.save_model(f"cv_logs/fold{fold_num}_system")
-        
-        print(f"Fold {fold_num + 1} Results:")
-        print(f"  Validation C-index: {val_c_index:.4f}")
-        print(f"  Test C-index: {test_c_index:.4f}")
-        
-        # Log to CSV
-        with open(results_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([fold_num, f"{val_c_index:.4f}", f"{test_c_index:.4f}"])
-
-    # Final summary
-    print(f"\n{'='*60}")
-    print(f"CROSS-VALIDATION COMPLETE")
-    print(f"{'='*60}")
-    print(f"Validation C-indices: {[f'{x:.4f}' for x in validation_c_indices]}")
-    print(f"Mean validation C-index: {np.mean(validation_c_indices):.4f} ± {np.std(validation_c_indices):.4f}")
-    print(f"Test C-indices: {[f'{x:.4f}' for x in test_c_indices]}")
-    print(f"Mean test C-index: {np.mean(test_c_indices):.4f} ± {np.std(test_c_indices):.4f}")
-    
-    return validation_c_indices, test_c_indices
-
-# =============================================================================
-# Main Function (Updated)
+# Main Function
 # =============================================================================
 
 def main():
-    """Main function for task 2 survival prognosis with inference support."""
-    
     set_random_seed(RANDOM_SEED)
-    
-    # Load and cache dataset (now also saves preprocessors)
+    os.makedirs("prognosis_logs", exist_ok=True)
+    device = setup_device()
+
     print("Loading dataset...")
     dataset_cache = load_and_cache_dataset(
         csv_path=EHR_DATA_PATH,
         image_directories=[TRAINING_IMAGES_PATH],
         cache_path="hecktor_cache.pkl"
     )
-    
-    print(f"\nDataset Summary:")
-    print(f"- Total patients: {len(dataset_cache['images'])}")
-        
-    # Run cross-validation    
-    print(f"\nStarting cross-validation...")
-    
-    validation_results, test_results = run_cross_validation(
-        cached_data=dataset_cache,
-        folds_json_path=FOLDS_PATH if os.path.exists(FOLDS_PATH) else None,
-        batch_size=6,
-        test_proportion=0.2,
-        training_iterations=25,  # Number of alternating training cycles
-        feature_epochs_per_iteration=10  # Feature extractor epochs per cycle
+    print(f"Total patients: {len(dataset_cache['images'])}")
+
+    # Three-way split: 70% train / 15% val / 15% test
+    clinical_df = dataset_cache['dataframe']
+    all_pids = clinical_df["PatientID"].values
+    all_events = clinical_df["Relapse"].values
+
+    pids_trainval, pids_test, ev_trainval, _ = train_test_split(
+        all_pids, all_events, test_size=0.15, stratify=all_events, random_state=RANDOM_SEED
     )
-    
-    # Final results
-    print(f"\n{'='*60}")
-    print("FINAL RESULTS")
-    print(f"{'='*60}")
-    print(f"Validation C-index: {np.mean(validation_results):.4f} ± {np.std(validation_results):.4f}")
-    print(f"Test C-index: {np.mean(test_results):.4f} ± {np.std(test_results):.4f}")
-    
-    # Find best fold and demonstrate inference setup
-    best_fold_idx = np.argmax(validation_results)
-    print(f"\nBest fold: {best_fold_idx} (C-index: {validation_results[best_fold_idx]:.4f})")
+    pids_train, pids_val = train_test_split(
+        pids_trainval, test_size=0.15 / 0.85, stratify=ev_trainval, random_state=RANDOM_SEED
+    )
+    print(f"Split — train: {len(pids_train)}, val: {len(pids_val)}, test: {len(pids_test)}")
+
+    train_loader = DataLoader(HecktorSurvivalDataset(dataset_cache, pids_train),
+                              batch_size=6, shuffle=True)
+    val_loader   = DataLoader(HecktorSurvivalDataset(dataset_cache, pids_val),
+                              batch_size=6, shuffle=False)
+    test_loader  = DataLoader(HecktorSurvivalDataset(dataset_cache, pids_test),
+                              batch_size=6, shuffle=False)
+
+    clinical_dim = HecktorSurvivalDataset(dataset_cache, pids_train)[0][1].shape[0]
+    model = HecktorSurvivalModel(clinical_feature_dim=clinical_dim, device=device, feature_dim=256)
+
+    model.fit(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_iterations=25,
+        feature_epochs_per_iteration=10,
+    )
+
+    val_c_index  = model.evaluate_system(val_loader)
+    test_c_index = model.evaluate_system(test_loader)
+    print(f"\nVal  C-index: {val_c_index:.4f}")
+    print(f"Test C-index: {test_c_index:.4f}")
+
+    model.save_model("prognosis_logs/final_model")
+
+    # Save test predictions
+    test_predictions, test_times, test_events = model.predict(test_loader)
+    pd.DataFrame({
+        'patient_id':     pids_test,
+        'risk_score':     test_predictions,
+        'survival_time':  test_times,
+        'event_indicator': test_events,
+    }).to_csv("prognosis_logs/test_predictions.csv", index=False)
+
 
 if __name__ == "__main__":
     main()

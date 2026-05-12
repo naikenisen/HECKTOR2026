@@ -1,61 +1,44 @@
-from monai.data import DataLoader, CacheDataset  # Make sure to import CacheDataset
-from .transforms import get_train_transforms, get_validation_transforms
-from typing import Tuple, List, Dict
-import json
 import os
+import random
+from monai.data import DataLoader, CacheDataset
+from .transforms import get_train_transforms, get_validation_transforms
+from typing import Tuple
 
-def load_splits(splits_file: str) -> List[Dict[str, List[str]]]:
+
+def get_dataloaders(config, val_split: float = 0.2, seed: int = 42) -> Tuple[DataLoader, DataLoader]:
     """
-    Load train/validation splits from a nnUNet-style JSON file.
-    (This function remains unchanged)
+    Create train and validation dataloaders with a simple random split.
     """
-    if not os.path.exists(splits_file):
-        raise FileNotFoundError(f"Splits file not found: {splits_file}")
-    with open(splits_file, 'r') as f:
-        splits = json.load(f)
-    return splits
+    images_dir = os.path.join(config.data_root, config.train_images_dir)
+    ct_files = sorted(f for f in os.listdir(images_dir) if f.endswith("_ct.npz"))
+    case_ids = [f.replace("_ct.npz", "") for f in ct_files]
 
+    random.seed(seed)
+    random.shuffle(case_ids)
+    n_val = int(len(case_ids) * val_split)
+    val_ids = case_ids[:n_val]
+    train_ids = case_ids[n_val:]
+    print(f"Split: {len(train_ids)} training cases, {len(val_ids)} validation cases")
 
-def get_dataloaders(config, fold: int = 0) -> Tuple[DataLoader, DataLoader]:
-    """
-    Create train and validation dataloaders using CacheDataset for training.
-    """
-    splits = load_splits(config.splits_file)
-    if fold >= len(splits):
-        raise ValueError(f"Fold {fold} is out of range.")
-        
-    train_ids = splits[fold]['train']
-    val_ids = splits[fold]['val']
-    print(f"Using fold {fold}: {len(train_ids)} training cases, {len(val_ids)} validation cases")
+    def make_file_list(ids):
+        return [
+            {
+                "ct":    os.path.join(config.data_root, config.train_images_dir, f"{cid}_ct.npz"),
+                "pet":   os.path.join(config.data_root, config.train_images_dir, f"{cid}_pet.npz"),
+                "label": os.path.join(config.data_root, config.train_labels_dir,  f"{cid}_label.npz"),
+            }
+            for cid in ids
+        ]
 
-    # --- Create file lists (this part is unchanged) ---
-    train_files = [
-        {"ct": os.path.join(config.data_root, config.train_images_dir, f"{case_id}_ct.npz"),
-         "pet": os.path.join(config.data_root, config.train_images_dir, f"{case_id}_pet.npz"),
-         "label": os.path.join(config.data_root, config.train_labels_dir, f"{case_id}_label.npz")}
-        for case_id in train_ids
-    ]
-    val_files = [
-        {"ct": os.path.join(config.data_root, config.train_images_dir, f"{case_id}_ct.npz"),
-         "pet": os.path.join(config.data_root, config.train_images_dir, f"{case_id}_pet.npz"),
-         "label": os.path.join(config.data_root, config.train_labels_dir, f"{case_id}_label.npz")}
-        for case_id in val_ids
-    ]
+    train_files = make_file_list(train_ids)
+    val_files   = make_file_list(val_ids)
 
-    # --- Training Data Pipeline with Caching ---
-    train_transforms = get_train_transforms(config)
-    
-    # MODIFICATION 1: Use CacheDataset instead of Dataset
-    # This will store transformed data in RAM to speed up epochs after the first one.
-    print(f"Creating CacheDataset for training with cache_rate={config.cache_rate}...")
     train_ds = CacheDataset(
         data=train_files,
-        transform=train_transforms,
-        cache_rate=config.cache_rate,      # Uses the value from your config file
-        num_workers=config.num_workers   # Uses workers to build the cache in parallel
+        transform=get_train_transforms(config),
+        cache_rate=config.cache_rate,
+        num_workers=config.num_workers,
     )
-
-    # MODIFICATION 2: Add persistent_workers=True for efficiency
     train_loader = DataLoader(
         train_ds,
         batch_size=config.batch_size,
@@ -63,12 +46,21 @@ def get_dataloaders(config, fold: int = 0) -> Tuple[DataLoader, DataLoader]:
         num_workers=config.num_workers,
         pin_memory=True,
         drop_last=True,
-        persistent_workers=True  # Recommended for saving overhead between epochs
+        persistent_workers=True,
     )
 
-    # --- Validation Data Pipeline (unchanged) ---
-    val_transforms = get_validation_transforms()
-    val_ds = CacheDataset(data=val_files, transform=val_transforms, cache_rate=config.cache_rate) # Cache all of validation
-    val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, num_workers=config.num_workers, persistent_workers=True)
-    
+    val_ds = CacheDataset(
+        data=val_files,
+        transform=get_validation_transforms(),
+        cache_rate=config.cache_rate,
+        num_workers=config.num_workers,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        persistent_workers=True,
+    )
+
     return train_loader, val_loader

@@ -13,8 +13,6 @@ class BaseConfig:
     data_root: str = "/path/to/hecktor2026_training"
     train_images_dir: str = "imagesTr_resampled_cropped_npy"
     train_labels_dir: str = "labelsTr_resampled_cropped_npy"
-    splits_file: str = "config/splits_final.json"
-    
     # Data properties
     input_channels: int = 2  # CT + PET
     num_classes: int = 3     # background + primary tumor + metastatic tumor
@@ -53,16 +51,12 @@ class BaseConfig:
     # Output directories
     experiment_name: str = "baseline"
     output_dir: str = "experiments"
-    fold: int = 0
-    
+
     def __post_init__(self):
-        """Setup output directories with fold-specific structure."""
-        # Create fold-specific directory structure
+        """Setup output directories."""
         self.experiment_dir = os.path.join(self.output_dir, self.experiment_name)
-        self.fold_dir = os.path.join(self.experiment_dir, f"fold_{self.fold}")
-        self.checkpoint_dir = os.path.join(self.fold_dir, "checkpoints")
-        self.log_dir = os.path.join(self.fold_dir, "logs")
-        
-        # Create directories
-        for dir_path in [self.experiment_dir, self.fold_dir, self.checkpoint_dir, self.log_dir]:
+        self.checkpoint_dir = os.path.join(self.experiment_dir, "checkpoints")
+        self.log_dir = os.path.join(self.experiment_dir, "logs")
+
+        for dir_path in [self.experiment_dir, self.checkpoint_dir, self.log_dir]:
             os.makedirs(dir_path, exist_ok=True)

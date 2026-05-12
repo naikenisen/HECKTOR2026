@@ -112,7 +112,6 @@ def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train HECKTOR segmentation model")
     parser.add_argument("--config", type=str, default="swinunetr", choices=["swinunetr"], help="Model configuration to use")
-    parser.add_argument("--fold", type=int, default=0, help="Cross-validation fold to use (0-4)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--device", type=str, help="Override device from config (e.g., 'cpu', 'cuda')")
     parser.add_argument("--cuda-device", type=int, default=0, help="CUDA device index")
@@ -125,7 +124,7 @@ def main():
     args = parse_args()
     
     # Setup configuration
-    config = SwinUNETRConfig(fold=args.fold)
+    config = SwinUNETRConfig()
     
     # Override device if specified
     if args.device:
@@ -153,8 +152,8 @@ def main():
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
     
     # Setup data
-    train_loader, val_loader = get_dataloaders(config, fold=args.fold)
-    logger.info(f"Data loaded for fold {args.fold}: {len(train_loader)} train batches, {len(val_loader)} val batches")
+    train_loader, val_loader = get_dataloaders(config)
+    logger.info(f"Data loaded: {len(train_loader)} train batches, {len(val_loader)} val batches")
     
     # Setup training components
     criterion = get_loss_function("dice_ce")

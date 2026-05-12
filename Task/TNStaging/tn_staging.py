@@ -1,11 +1,10 @@
 import os
-import csv
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.metrics import balanced_accuracy_score, recall_score
 from monai.transforms import (
@@ -140,11 +139,12 @@ class MultiModalTNModel(nn.Module):
 # Training
 # =============================================================================
 
-def run_crossval(csv_path, img_dir, num_epochs=10, batch_size=4):
-    os.makedirs("fold_logs_tn", exist_ok=True)
-    summary_path = "fold_logs_tn/cv_summary.csv"
+def train(csv_path, img_dir, num_epochs=10, batch_size=4, val_split=0.15, test_split=0.15):
+    os.makedirs("tn_logs", exist_ok=True)
 
     df_all = pd.read_csv(csv_path)
+    all_pids = df_all["PatientID"].values
+    all_strata = df_all["T_stage"].astype(str) + "_" + df_all["N_stage"].astype(str)
 
     # Fit global preprocessors on all data
     num_cols = ["Age"]
@@ -157,122 +157,94 @@ def run_crossval(csv_path, img_dir, num_epochs=10, batch_size=4):
     t_encoder = LabelEncoder().fit(T_STAGES)
     n_encoder = LabelEncoder().fit(N_STAGES)
 
-    all_pids = df_all["PatientID"].values
-    # Stratify on combined T+N stage for balanced splits
-    all_strata = df_all["T_stage"].astype(str) + "_" + df_all["N_stage"].astype(str)
-
+    # Three-way split: train / val / test
     pids_trainval, pids_test, strat_trainval, _ = train_test_split(
-        all_pids, all_strata, test_size=0.2, stratify=all_strata, random_state=42
+        all_pids, all_strata, test_size=test_split, stratify=all_strata, random_state=42
     )
+    val_fraction = val_split / (1.0 - test_split)
+    pids_train, pids_val = train_test_split(
+        pids_trainval, test_size=val_fraction, stratify=strat_trainval, random_state=42
+    )
+    print(f"Split — train: {len(pids_train)}, val: {len(pids_val)}, test: {len(pids_test)}")
 
-    test_ds = HecktorTNDataset(csv_path, img_dir, img_transforms,
-                               patient_ids=pids_test, scaler=scaler, ohe=ohe,
-                               t_encoder=t_encoder, n_encoder=n_encoder)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    train_ds = HecktorTNDataset(csv_path, img_dir, img_transforms,
+                                patient_ids=pids_train, scaler=scaler, ohe=ohe,
+                                t_encoder=t_encoder, n_encoder=n_encoder)
+    val_ds   = HecktorTNDataset(csv_path, img_dir, img_transforms,
+                                patient_ids=pids_val, scaler=scaler, ohe=ohe,
+                                t_encoder=t_encoder, n_encoder=n_encoder)
+    test_ds  = HecktorTNDataset(csv_path, img_dir, img_transforms,
+                                patient_ids=pids_test, scaler=scaler, ohe=ohe,
+                                t_encoder=t_encoder, n_encoder=n_encoder)
 
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
+    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False)
 
-    with open(summary_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Fold", "Best_Val_BalAcc_T", "Best_Val_BalAcc_N",
-                         "Test_BalAcc_T", "Test_BalAcc_N",
-                         "Test_Recall_T", "Test_Recall_N"])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MultiModalTNModel(
+        clin_feat_dim=train_ds.clinical_feats.shape[1],
+        num_t_classes=len(T_STAGES),
+        num_n_classes=len(N_STAGES),
+    ).to(device)
 
-    for fold, (train_idx, val_idx) in enumerate(skf.split(pids_trainval, strat_trainval)):
-        print(f"\n--- Fold {fold + 1}/5 ---")
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    criterion = nn.CrossEntropyLoss()
+    best_val_score = 0.0
+    best_model_path = "tn_logs/best_model.pt"
 
-        p_train = pids_trainval[train_idx]
-        p_val = pids_trainval[val_idx]
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        for x_img, x_clin, t_lbl, n_lbl in train_loader:
+            x_img, x_clin = x_img.to(device), x_clin.to(device)
+            t_lbl, n_lbl  = t_lbl.to(device),  n_lbl.to(device)
+            optimizer.zero_grad()
+            t_logits, n_logits = model(x_img, x_clin)
+            loss = criterion(t_logits, t_lbl) + criterion(n_logits, n_lbl)
+            loss.backward()
+            optimizer.step()
 
-        train_ds = HecktorTNDataset(csv_path, img_dir, img_transforms,
-                                    patient_ids=p_train, scaler=scaler, ohe=ohe,
-                                    t_encoder=t_encoder, n_encoder=n_encoder)
-        val_ds = HecktorTNDataset(csv_path, img_dir, img_transforms,
-                                  patient_ids=p_val, scaler=scaler, ohe=ohe,
-                                  t_encoder=t_encoder, n_encoder=n_encoder)
-
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-
-        model = MultiModalTNModel(
-            clin_feat_dim=train_ds.clinical_feats.shape[1],
-            num_t_classes=len(T_STAGES),
-            num_n_classes=len(N_STAGES),
-        ).cuda()
-
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-        criterion = nn.CrossEntropyLoss()
-        best_val_score = 0.0
-        best_model_path = f"fold_logs_tn/best_model_fold{fold}.pt"
-
-        for epoch in range(1, num_epochs + 1):
-            model.train()
-            for x_img, x_clin, t_lbl, n_lbl in train_loader:
-                x_img, x_clin = x_img.cuda(), x_clin.cuda()
-                t_lbl, n_lbl = t_lbl.cuda(), n_lbl.cuda()
-                optimizer.zero_grad()
-                t_logits, n_logits = model(x_img, x_clin)
-                loss = criterion(t_logits, t_lbl) + criterion(n_logits, n_lbl)
-                loss.backward()
-                optimizer.step()
-
-            # Validation
-            model.eval()
-            all_t_true, all_t_pred = [], []
-            all_n_true, all_n_pred = [], []
-            with torch.no_grad():
-                for x_img, x_clin, t_lbl, n_lbl in val_loader:
-                    x_img, x_clin = x_img.cuda(), x_clin.cuda()
-                    t_logits, n_logits = model(x_img, x_clin)
-                    all_t_true.extend(t_lbl.numpy())
-                    all_t_pred.extend(t_logits.cpu().argmax(dim=1).numpy())
-                    all_n_true.extend(n_lbl.numpy())
-                    all_n_pred.extend(n_logits.cpu().argmax(dim=1).numpy())
-
-            bal_acc_t = balanced_accuracy_score(all_t_true, all_t_pred)
-            bal_acc_n = balanced_accuracy_score(all_n_true, all_n_pred)
-            mean_bal_acc = (bal_acc_t + bal_acc_n) / 2
-
-            print(f"  Epoch {epoch:02d} | Val BalAcc T: {bal_acc_t:.4f}  N: {bal_acc_n:.4f}  Mean: {mean_bal_acc:.4f}")
-
-            if mean_bal_acc > best_val_score:
-                best_val_score = mean_bal_acc
-                torch.save(model.state_dict(), best_model_path)
-
-        print(f"Best mean val BalAcc (fold {fold}): {best_val_score:.4f}")
-
-        # Evaluate on test set
-        model.load_state_dict(torch.load(best_model_path))
         model.eval()
-        all_t_true, all_t_pred = [], []
-        all_n_true, all_n_pred = [], []
+        all_t_true, all_t_pred, all_n_true, all_n_pred = [], [], [], []
         with torch.no_grad():
-            for x_img, x_clin, t_lbl, n_lbl in test_loader:
-                x_img, x_clin = x_img.cuda(), x_clin.cuda()
+            for x_img, x_clin, t_lbl, n_lbl in val_loader:
+                x_img, x_clin = x_img.to(device), x_clin.to(device)
                 t_logits, n_logits = model(x_img, x_clin)
                 all_t_true.extend(t_lbl.numpy())
                 all_t_pred.extend(t_logits.cpu().argmax(dim=1).numpy())
                 all_n_true.extend(n_lbl.numpy())
                 all_n_pred.extend(n_logits.cpu().argmax(dim=1).numpy())
 
-        test_bal_t = balanced_accuracy_score(all_t_true, all_t_pred)
-        test_bal_n = balanced_accuracy_score(all_n_true, all_n_pred)
-        test_rec_t = recall_score(all_t_true, all_t_pred, average="macro", zero_division=0)
-        test_rec_n = recall_score(all_n_true, all_n_pred, average="macro", zero_division=0)
+        bal_acc_t = balanced_accuracy_score(all_t_true, all_t_pred)
+        bal_acc_n = balanced_accuracy_score(all_n_true, all_n_pred)
+        mean_bal_acc = (bal_acc_t + bal_acc_n) / 2
+        print(f"Epoch {epoch:02d} | Val BalAcc T: {bal_acc_t:.4f}  N: {bal_acc_n:.4f}  Mean: {mean_bal_acc:.4f}")
 
-        print(f"Test BalAcc  T: {test_bal_t:.4f}  N: {test_bal_n:.4f}")
-        print(f"Test Recall  T: {test_rec_t:.4f}  N: {test_rec_n:.4f}")
+        if mean_bal_acc > best_val_score:
+            best_val_score = mean_bal_acc
+            torch.save(model.state_dict(), best_model_path)
 
-        with open(summary_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([fold,
-                             f"{best_val_score:.4f}", f"{best_val_score:.4f}",
-                             f"{test_bal_t:.4f}", f"{test_bal_n:.4f}",
-                             f"{test_rec_t:.4f}", f"{test_rec_n:.4f}"])
+    # Final evaluation on test set
+    model.load_state_dict(torch.load(best_model_path))
+    model.eval()
+    all_t_true, all_t_pred, all_n_true, all_n_pred = [], [], [], []
+    with torch.no_grad():
+        for x_img, x_clin, t_lbl, n_lbl in test_loader:
+            x_img, x_clin = x_img.to(device), x_clin.to(device)
+            t_logits, n_logits = model(x_img, x_clin)
+            all_t_true.extend(t_lbl.numpy())
+            all_t_pred.extend(t_logits.cpu().argmax(dim=1).numpy())
+            all_n_true.extend(n_lbl.numpy())
+            all_n_pred.extend(n_logits.cpu().argmax(dim=1).numpy())
+
+    print(f"\nTest BalAcc  T: {balanced_accuracy_score(all_t_true, all_t_pred):.4f}"
+          f"  N: {balanced_accuracy_score(all_n_true, all_n_pred):.4f}")
+    print(f"Test Recall  T: {recall_score(all_t_true, all_t_pred, average='macro', zero_division=0):.4f}"
+          f"  N: {recall_score(all_n_true, all_n_pred, average='macro', zero_division=0):.4f}")
 
 
 if __name__ == "__main__":
-    run_crossval(
+    train(
         csv_path=PATH_TO_CSV,
         img_dir=PATH_TO_TRAINING_IMAGES,
         num_epochs=10,

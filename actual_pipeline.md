@@ -49,6 +49,8 @@ Participants are invited to develop a multimodal pipeline leveraging FDG PET, CT
 This unified task reflects a realistic clinical workflow, integrating diagnosis, staging, and prognosis into a single framework.
 
 ## Pipeline 2026 pour la prédiction de la survie par End-to-End Multitask Learning
+
+```
 CT+PET (2 canaux, 128³ ou 256³)
         │
         ▼
@@ -160,3 +162,4 @@ SORTIES CLINIQUES — Rapport généré par patient
   │     • Probabilité cumulée de récidive à 1 an : XX%             │
   │     • Probabilité cumulée de récidive à 2 ans : XX%            │
   └─────────────────────────────────────────────────────────────────┘
+```
