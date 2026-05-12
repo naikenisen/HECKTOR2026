@@ -53,7 +53,12 @@ CT+PET (2 canaux, 128³ ou 256³)
         │
         ▼
 ┌─────────────────────────────────┐
-│SegMamba Encoder Pré-entraîné SSL│
+ SegResNet - vista3d.pt
+ SwinUNETR - SSL sur 5050 CTs 
+
+              ou
+
+ SegMamba Encoder Pré-entraîné SSL
 │      (Poids gelés + LoRA)       │
 └─────────────────┬───────────────┘
                   │
@@ -80,9 +85,7 @@ Masque          Logits T        Logits N
   │               token_tn (B, 1, d_model)
   │                       │                    ┌──────────────────────────┐
   │                       │                    │ Données Cliniques (B, 7) │
-  │                       │                    │ Âge, Sexe, Tabac,        │
-  │                       │                    │ Alcool, Perf., M-stage,  │
-  │                       │                    │ Traitement               │
+  │                       │                    │ Âge, Sexe, HPV, M-stage..│
   │                       │                    └────────────┬─────────────┘
   │                       │                                 │
   │                       │                    Tabular Transformer
