@@ -18,7 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import SegResNetConfig
 from models import SegResNetModel
-from data import get_dataloaders
+from dataloader import get_dataloaders
 from utils.losses import get_loss_function
 from utils.logging import setup_logging
 
