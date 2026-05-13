@@ -72,13 +72,16 @@ Masque          Logits T        Logits N
            └──────────────────────────┬───────────────────────────────┘
                                       │
                                       ▼
-                         Tête de Survie (Discrete-Time)
+                        Survival-Head (Discrete-Time)
                          nn.Linear(d_model→256→T)
-                         + softmax sur T intervalles
                                       │
                                       ▼
-                          Risk Probabilities (B, T) ──► L_Surv (DeepHit)
-
+                           logits bruts (B, T)
+                                      │   L_Surv (DeepHit)
+                                 softmax(logits)
+                                      │
+                                      ▼
+                          Risk Probabilities (B, T)
 ═══════════════════════════════════════════════════════════════════════════════
 
 FONCTION DE PERTE TOTALE (End-to-End) :
