@@ -1,5 +1,3 @@
-"""SwinUNETR — configuration et modèle."""
-
 import os
 import torch
 import torch.nn as nn
@@ -7,74 +5,88 @@ from dataclasses import dataclass
 from typing import Tuple
 from monai.networks.nets import SwinUNETR
 
-
+# Configuration du backbone SwinUNETR utilisée par SwinUNETRMultitask
 @dataclass
 class SwinUNETRConfig:
 
-    # Data paths
+    # Chemin racine vers les données d'entraînement
     data_root: str = "/path/to/hecktor2026_training"
+    # Sous-dossier des images CT/PET preprocessées
     train_images_dir: str = "imagesTr_resampled_cropped_npy"
+    # Sous-dossier des labels de segmentation preprocessés
     train_labels_dir: str = "labelsTr_resampled_cropped_npy"
 
-    # Data properties
-    input_channels: int = 2                           # CT + PET
-    num_classes: int = 3                              # bg + GTVp + GTVn
+    # Nombre de canaux d'entrée (CT + PET)
+    input_channels: int = 2
+    # Nombre de classes de segmentation (bg, GTVp, GTVn)
+    num_classes: int = 3
+    # Taille spatiale du volume 3D en voxels
     spatial_size: Tuple[int, int, int] = (128, 128, 128)
 
-    # Training
+    # Taille de batch
     batch_size: int = 2
+    # Learning rate initial
     learning_rate: float = 1e-4
+    # Coefficient de régularisation L2
     weight_decay: float = 1e-5
+    # Nombre total d'epochs
     num_epochs: int = 350
+    # Puissance du scheduler PolynomialLR
     poly_lr_power: float = 0.9
+    # Learning rate minimum pour le scheduler
     poly_lr_min_lr: float = 1e-6
 
-    # Augmentation
+    # Active les augmentations d'entraînement
     use_augmentation: bool = True
+    # Probabilité d'application de chaque augmentation
     aug_probability: float = 0.5
 
-    # System
+    # Périphérique cible
     device: str = "cuda"
+    # Nombre de workers du DataLoader
     num_workers: int = 4
+    # Fraction du dataset mise en cache RAM
     cache_rate: float = 0.25
+    # Fréquence de sauvegarde en epochs
     save_checkpoint_every: int = 1
+    # Active les logs TensorBoard
     use_tensorboard: bool = True
 
-    # Output
+    # Nom de l'expérience pour l'arborescence de sortie
     experiment_name: str = "swinunetr"
+    # Dossier racine de sortie
     output_dir: str = "experiments"
 
-    # Architecture — must match pretrained checkpoint (feature_size=48 for MONAI SSL)
+    # Taille des feature maps (doit correspondre aux poids SSL MONAI)
     feature_size: int = 48
-    use_checkpoint: bool = True   # gradient checkpointing — saves VRAM during training
+    # Active le gradient checkpointing pour économiser la VRAM
+    use_checkpoint: bool = True
 
-    # MONAI SSL pretrained SwinViT encoder (required)
-    # Download: https://github.com/Project-MONAI/MONAI-extra-test-data/releases/download/0.8.1/model_swinvit.pt
+    # Chemin vers les poids SSL pré-entraînés du SwinViT MONAI
     pretrained_path: str = "model_swinvit.pt"
 
+    # Crée les dossiers de sortie après initialisation du dataclass
     def __post_init__(self):
+        # Dossier principal de l'expérience
         self.experiment_dir = os.path.join(self.output_dir, self.experiment_name)
+        # Dossier des checkpoints sauvegardés
         self.checkpoint_dir = os.path.join(self.experiment_dir, "checkpoints")
-        self.log_dir        = os.path.join(self.experiment_dir, "logs")
+        # Dossier des logs TensorBoard
+        self.log_dir = os.path.join(self.experiment_dir, "logs")
         for d in [self.experiment_dir, self.checkpoint_dir, self.log_dir]:
             os.makedirs(d, exist_ok=True)
 
 
+# Sous-classe MONAI SwinUNETR qui expose le bottleneck en plus du masque de segmentation
 class SwinUNETRMultitask(nn.Module):
-    """
-    SwinUNETR exposant à la fois :
-      - le masque de segmentation final (B, num_classes, D, H, W)
-      - la feature bottleneck du SwinViT (B, C, D', H', W')  — feature la plus profonde
 
-    On réutilise le SwinUNETR de MONAI : son attribut `swinViT` renvoie la liste
-    des feature maps hiérarchiques [stage0, stage1, stage2, stage3, stage4].
-    Le bottleneck correspond au dernier élément (downscale ×32, C=feature_size*16).
-    """
-
+    # Instancie le SwinUNETR MONAI et charge les poids SSL si disponibles
     def __init__(self, config: SwinUNETRConfig):
         super().__init__()
+        # Référence à la configuration du backbone
         self.config = config
 
+        # Instance SwinUNETR MONAI standard (sera appelé manuellement dans forward)
         self.swinunetr = SwinUNETR(
             img_size=config.spatial_size,
             in_channels=config.input_channels,
@@ -88,30 +100,40 @@ class SwinUNETRMultitask(nn.Module):
             if "state_dict" in weights:
                 weights = weights["state_dict"]
             self.swinunetr.load_from(weights=weights)
-            print(f"[SwinUNETRMultitask] SSL weights chargés depuis '{config.pretrained_path}'.")
+            print(f"[SwinUNETRMultitask] SSL weights loaded from '{config.pretrained_path}'.")
         else:
-            print(f"[SwinUNETRMultitask] ATTENTION : poids SSL introuvables ({config.pretrained_path}). Décodeur init aléatoire.")
+            print(f"[SwinUNETRMultitask] WARNING: SSL weights not found ({config.pretrained_path}). Random init.")
 
+    # Retourne (seg_logits, bottleneck) en reproduisant manuellement le forward MONAI
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Reproduit le forward de monai.networks.nets.SwinUNETR mais expose en plus
-        le bottleneck. Cf. https://github.com/Project-MONAI/MONAI swinunetr.py.
-        """
+        # Raccourci vers l'instance SwinUNETR interne
         net = self.swinunetr
+        # Liste des feature maps hiérarchiques [stage0..stage3, bottleneck]
         hidden_states_out = net.swinViT(x, net.normalize)
-        # hidden_states_out = [stage0, stage1, stage2, stage3, bottleneck]
+        # Feature map la plus profonde (downscale ×32, C=feature_size×16)
         bottleneck = hidden_states_out[4]
 
+        # Encodeur skip-connection niveau 0 (résolution originale)
         enc0 = net.encoder1(x)
+        # Encodeur skip-connection niveau 1
         enc1 = net.encoder2(hidden_states_out[0])
+        # Encodeur skip-connection niveau 2
         enc2 = net.encoder3(hidden_states_out[1])
+        # Encodeur skip-connection niveau 3
         enc3 = net.encoder4(hidden_states_out[2])
+        # Encodeur bottleneck (niveau 4)
         dec4 = net.encoder10(hidden_states_out[4])
+        # Décodeur niveau 3
         dec3 = net.decoder5(dec4, hidden_states_out[3])
+        # Décodeur niveau 2
         dec2 = net.decoder4(dec3, enc3)
+        # Décodeur niveau 1
         dec1 = net.decoder3(dec2, enc2)
+        # Décodeur niveau 0
         dec0 = net.decoder2(dec1, enc1)
-        out  = net.decoder1(dec0, enc0)
+        # Décodeur final avant la couche de sortie
+        out = net.decoder1(dec0, enc0)
+        # Logits de segmentation (B, num_classes, D, H, W)
         seg_logits = net.out(out)
 
         return seg_logits, bottleneck

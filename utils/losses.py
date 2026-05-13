@@ -1,10 +1,8 @@
-"""Loss functions for the HECKTOR 2026 multitask pipeline."""
-
 import torch
 import torch.nn as nn
 from monai.losses import DiceFocalLoss
 
-# Segmentation — MONAI DiceFocalLoss
+# Perte de segmentation combinant Dice et Focal Loss (via MONAI)
 seg_loss = DiceFocalLoss(
     to_onehot_y=True,
     softmax=True,
@@ -12,112 +10,112 @@ seg_loss = DiceFocalLoss(
     reduction="mean",
 )
 
-
-# TN Staging — standard CrossEntropy (one per head)
+# Perte cross-entropie pour la classification du staging T
 t_loss = nn.CrossEntropyLoss()
+# Perte cross-entropie pour la classification du staging N
 n_loss = nn.CrossEntropyLoss()
 
-# Survival — DeepHit discret (NLL + ranking sur la CIF)
+
+# Perte DeepHit discrète : NLL sur les bins de survie + terme de ranking sur la CIF
 class DeepHitDiscreteLoss(nn.Module):
-    """
-    DeepHit discret pour survie en temps discrétisé.
 
-    Inputs
-    ------
-    logits       : (B, T)            logits bruts du survival head
-    times        : (B,)              temps de suivi (en années / mois — peu importe)
-    events       : (B,)              indicateur d'événement (1=relapse, 0=censuré)
-    bin_edges    : (T+1,)            bornes des intervalles temporels (quantiles fit sur train)
-
-    Loss = L_NLL + α · L_rank
-      L_NLL  : -log p(bin_event | x) pour les événements observés
-               -log P(T > bin_censor | x) pour les censurés
-      L_rank : pénalise un classement incorrect du CIF entre paires comparables
-    """
-
+    # Initialise les hyperparamètres alpha (poids ranking) et sigma (échelle ranking)
     def __init__(self, alpha: float = 0.2, sigma: float = 0.1):
         super().__init__()
+        # Poids du terme de ranking par rapport au NLL
         self.alpha = alpha
+        # Paramètre d'échelle de la pénalité exponentielle du ranking
         self.sigma = sigma
 
+    # Convertit des temps continus en indices de bins discrets (0..T−1)
     @staticmethod
     def time_to_bin(times: torch.Tensor, bin_edges: torch.Tensor) -> torch.Tensor:
-        """Retourne l'index du bin (0..T-1) pour chaque temps."""
+        # Nombre de bins temporels
         T = bin_edges.numel() - 1
-        # torch.bucketize : retourne l'index de l'intervalle (1..T), on clamp → 0..T-1
+        # Indexation par bucketize puis clamp pour rester dans [0, T−1]
         idx = torch.bucketize(times, bin_edges[1:-1], right=False)
         return idx.clamp(0, T - 1).long()
 
+    # Calcule la perte totale L_NLL + alpha * L_rank sur le batch
     def forward(self, logits: torch.Tensor, times: torch.Tensor,
                 events: torch.Tensor, bin_edges: torch.Tensor) -> torch.Tensor:
+        # Périphérique courant
         device = logits.device
+        # Taille du batch et nombre de bins
         B, T = logits.shape
-        pmf = torch.softmax(logits, dim=-1)                          # (B, T)
-        cif = torch.cumsum(pmf, dim=-1)                              # (B, T)
+        # Distribution de masse de probabilité sur les T bins (B, T)
+        pmf = torch.softmax(logits, dim=-1)
+        # Fonction d'incidence cumulée (CIF) : probabilité cumulée d'événement (B, T)
+        cif = torch.cumsum(pmf, dim=-1)
 
-        k = self.time_to_bin(times, bin_edges)                       # (B,)
+        # Indice de bin pour chaque patient selon son temps de suivi (B,)
+        k = self.time_to_bin(times, bin_edges)
+        # Masque booléen des patients avec un événement observé
         events_b = events.bool()
 
-        # ---- NLL ----
+        # Petite valeur pour éviter log(0)
         eps = 1e-8
-        p_event = pmf.gather(1, k.unsqueeze(1)).squeeze(1)           # (B,)
-        # Survie au-delà du bin k pour les censurés : 1 - CIF[k]
-        s_censor = 1.0 - cif.gather(1, k.unsqueeze(1)).squeeze(1)    # (B,)
+        # Probabilité PMF au bin de l'événement pour chaque patient (B,)
+        p_event = pmf.gather(1, k.unsqueeze(1)).squeeze(1)
+        # Probabilité de survie au-delà du bin de censure : 1 − CIF[k] (B,)
+        s_censor = 1.0 - cif.gather(1, k.unsqueeze(1)).squeeze(1)
 
-        nll_event  = -torch.log(p_event[events_b].clamp_min(eps)).sum() \
-                     if events_b.any() else torch.tensor(0.0, device=device)
+        # NLL pour les patients avec événement
+        nll_event = -torch.log(p_event[events_b].clamp_min(eps)).sum() \
+                    if events_b.any() else torch.tensor(0.0, device=device)
+        # NLL pour les patients censurés
         nll_censor = -torch.log(s_censor[~events_b].clamp_min(eps)).sum() \
                      if (~events_b).any() else torch.tensor(0.0, device=device)
+        # NLL moyenne sur le batch
         l_nll = (nll_event + nll_censor) / max(B, 1)
 
-        # ---- Ranking ----
-        # Paires (i, j) tel que événement_i = 1 et t_i < t_j (j peut être censuré).
-        # On veut CIF_i(k_i) > CIF_j(k_i) → on pénalise sinon.
         if events_b.any():
-            cif_at_ki = cif.gather(1, k.unsqueeze(1))                # (B, 1)
-            # cif_i_at_ki : (B,) ; cif_j_at_ki : besoin (B, B) via index k_i pour chaque j
-            #   cif_j_at_ki[i, j] = cif[j, k_i]
-            ki_expand = k.view(1, B).expand(B, B)                    # (B_i, B_j) chacun = k_i
+            # CIF de chaque patient évaluée à son propre bin k_i (B, 1)
+            cif_at_ki = cif.gather(1, k.unsqueeze(1))
+            # Expansion de k pour indexer la CIF de tous les patients j au bin k_i
+            ki_expand = k.view(1, B).expand(B, B)
+            # CIF du patient j évaluée au bin k_i de i — matrice (B_i, B_j)
             cif_j_at_ki = cif.unsqueeze(0).expand(B, B, T).gather(2, ki_expand.unsqueeze(-1)).squeeze(-1)
-            #   .unsqueeze(0) : (1, B, T)  →  expand (B_i, B_j, T)
-            cif_i_at_ki = cif_at_ki.expand(B, B)                     # (B_i, B_j)
+            # CIF du patient i évaluée à son propre bin, broadcastée à (B_i, B_j)
+            cif_i_at_ki = cif_at_ki.expand(B, B)
 
-            time_mat  = times.view(B, 1) < times.view(1, B)          # i a un temps < j
-            valid     = events_b.view(B, 1) & time_mat               # (B_i, B_j)
+            # Masque des paires où t_i < t_j (i précède j dans le temps)
+            time_mat = times.view(B, 1) < times.view(1, B)
+            # Paires valides : i a un événement et survient avant j
+            valid = events_b.view(B, 1) & time_mat
 
-            diff = (cif_i_at_ki - cif_j_at_ki)                       # > 0 si bien classé
+            # Différence de CIF : positif si i est bien rangé devant j
+            diff = cif_i_at_ki - cif_j_at_ki
+            # Pénalité exponentielle pour les paires mal classées
             rank_loss = torch.exp(-diff / self.sigma)
             rank_loss = (rank_loss * valid.float()).sum() / (valid.float().sum() + eps)
         else:
+            # Pas de paires valides dans ce batch
             rank_loss = torch.tensor(0.0, device=device)
 
         return l_nll + self.alpha * rank_loss
 
-# Uncertainty Weighting — Kendall et al. 2018
-class UncertaintyWeightedLoss(nn.Module):
-    """
-    Combines N task losses with learnable uncertainty weights.
-    Add the parameters of this module to the optimizer alongside the model.
-    """
 
+# Pondération des pertes multitâches par incertitude apprise (Kendall et al. 2018)
+class UncertaintyWeightedLoss(nn.Module):
+
+    # Initialise un log(σ) appris par tâche (σ=1 au démarrage)
     def __init__(self, n_tasks: int = 4):
         super().__init__()
-        # log(σ) initialised to 0  →  σ=1, weight=0.5 at the start
+        # Paramètres appris log(σᵢ) — un par tâche — ajoutés à l'optimiseur
         self.log_sigma = nn.Parameter(torch.zeros(n_tasks))
 
+    # Combine les N pertes scalaires et retourne (perte_totale, poids_détachés)
     def forward(self, *task_losses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            *task_losses: individual scalar losses (L_seg, L_T, L_N, L_surv)
-        Returns:
-            total_loss, weights  (weights = 1/(2σᵢ²) for logging)
-        """
         assert len(task_losses) == self.log_sigma.numel(), \
             f"Expected {self.log_sigma.numel()} losses, got {len(task_losses)}"
 
-        sigma_sq = torch.exp(2 * self.log_sigma)           # σᵢ²
-        weights  = 1.0 / (2.0 * sigma_sq)                  # 1/(2σᵢ²)
+        # Variance de chaque tâche σᵢ²
+        sigma_sq = torch.exp(2 * self.log_sigma)
+        # Poids de chaque tâche : 1/(2σᵢ²)
+        weights = 1.0 / (2.0 * sigma_sq)
 
+        # Perte totale = Σ [ wᵢ · Lᵢ + log(σᵢ) ] selon la formule de Kendall
         total = sum(w * l + s for w, l, s in
                     zip(weights, task_losses, self.log_sigma))
         return total, weights.detach()

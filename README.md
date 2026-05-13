@@ -1,10 +1,10 @@
 # HECKTOR 2026 
 
-## Approches précédentes
-- Les trois tâches du challenge (segmentation, staging, pronostic) sont **complètement isolées** : aucune information ne circule entre elles.
-- L'image est dégradée à 96³, sans information sur la localisation tumorale.
+## Previous approaches
+- The three challenge tasks (segmentation, staging, prognosis) are **completely isolated**: no information flows between them.
+- The image is downgraded to 96³, without any information about tumor localisation.
 
-## Consignes 2026
+## 2026 Guidelines
 Participants are invited to develop a multimodal pipeline leveraging FDG PET, CT, and clinical data to:
 
     Segment primary tumors and lymph nodes
@@ -15,23 +15,23 @@ This unified task reflects a realistic clinical workflow, integrating diagnosis,
 
 ---
 
-## Pipeline 2026 — End-to-End Multitask Learning
+## 2026 Pipeline — End-to-End Multitask Learning
 
 ```
   CT+PET (RAW)
         |
         | preprocessing (src/preprocessing.py)
-        | resampling 2×2×2 mm³, crop 128³ centré tumeur
+        | resampling 2×2×2 mm³, crop 128³ centred on tumour
         |
 CT+PET (B, 2, 128, 128, 128)
         |
         | dataloading and transformation (src/dataloader.py, src/transforms.py)
-        | valeurs manquantes : variables catégorielles → classe "Inconnu"
-        | variables continues → normalisation + imputation médiane
+        | missing values: categorical variables → "Unknown" class
+        | continuous variables → normalisation + median imputation
         │
         ▼
     SwinUNETR (src/swinunetr.py)
-    poids SSL pré-entraînés sur 5050 CTs (model_swinvit.pt)
+    SSL pre-trained weights on 5050 CTs (model_swinvit.pt)
         │
     L_Seg = Dice+Focal (utils/losses.py)
         │
@@ -57,8 +57,8 @@ T-Head (src/heads.py)    N-Head (src/heads.py)
                   │          Clinical (B, 7)
                   │               │
                   │     MLP (7→64→d_model) (src/clinical_encoder.py)
-                  │     NaN → classe "Inconnu" pour catégorielles
-                  │     NaN → imputation médiane pour continues
+                  │     NaN → "Unknown" class for categoricals
+                  │     NaN → median imputation for continuous
                   │               │
                   │          token_clin (B, 1, d_model)
                   │               │
@@ -74,19 +74,19 @@ T-Head (src/heads.py)    N-Head (src/heads.py)
       │  Linear(C, d_model)(bottleneck.flatten(2)        │
       │  .permute(0,2,1))                                │
       │                                                  │
-      │  attn(Q, K, V) → CLS enrichi (B, d_model)        │
+      │  attn(Q, K, V) → enriched CLS (B, d_model)       │
       └─────────────────────────┬───────────────────────┘
                                 │
                                 ▼
                 Survival Head (Discrete-Time)
                 nn.Linear(d_model → 256 → T) (src/heads.py)
-                T intervalles définis par quantiles
-                sur les temps d'événements du train set
+                T intervals defined by quantiles
+                over event times from the train set
                                 │
                     ┌───────────┴────────────┐
                     │                        │
-                    ▼ (entraînement)         ▼ (inférence)
-             logits bruts (B, T)        softmax(logits)
+                    ▼ (training)             ▼ (inference)
+             raw logits (B, T)          softmax(logits)
              L_Surv = DeepHit               │
              (utils/losses.py)         Risk Probabilities (B, T)
              gradient clipping
@@ -94,47 +94,46 @@ T-Head (src/heads.py)    N-Head (src/heads.py)
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-FONCTION DE PERTE TOTALE (End-to-End) :
+TOTAL LOSS FUNCTION (End-to-End):
 
   L_Total = w₁·L_Seg + w₂·L_T + w₃·L_N + w₄·L_Surv
 
-  • Poids dynamiques (wᵢ) ajustés par Uncertainty Weighting (Kendall et al.)
-  • Les gradients de toutes les pertes remontent jusqu'au Bottleneck
-  • Rétropropagation de L_Surv via la cross-attention → Bottleneck
-  • Warm-up : gel des têtes T/N et Survie pendant N_warmup époques
-    → seule la segmentation est entraînée
-    → puis dégel progressif de toutes les têtes
+  • Dynamic weights (wᵢ) adjusted by Uncertainty Weighting (Kendall et al.)
+  • Gradients from all losses backpropagate through the Bottleneck
+  • Backpropagation of L_Surv via cross-attention → Bottleneck
+  • Warm-up: T/N and Survival heads are frozen for N_warmup epochs
+    → only segmentation is trained
+    → then progressive unfreezing of all heads
 
 ═══════════════════════════════════════════════════════════════════════════════
 ```
 
 ---
 
-## Structure du repo
+## Repository structure
 
 ```
 hecktor2026/
 │
-├── train.py                     # point d'entrée unique
+├── train.py                     # single entry point
 │
 ├── src/
-│   ├── dataset.py               # HECKTORDataset + gestion valeurs manquantes
-│   ├── transforms.py            # augmentations MONAI (flip, bruit, intensity)
+│   ├── dataset.py               # HECKTORDataset + missing value handling
+│   ├── transforms.py            # MONAI augmentations (flip, noise, intensity)
 │   ├── preprocessing.py         # resampling 2×2×2 mm³, crop 128³
 │   │
-│   ├── model.py                 # MultitaskModel — fichier central
-│   │                            # forward() connecte tous les composants
-│   │                            # garantit la backprop end-to-end
+│   ├── model.py                 # MultitaskModel — central file
+│   │                            # forward() connects all components
+│   │                            # guarantees end-to-end backprop
 │   │
-│   ├── swinunetr.py             # SwinUNETRMultitask (sous-classe MONAI)
-│   │                            # retourne (seg_mask, bottleneck)
-│   ├── heads.py                 # TNHead (retourne feat + logits) + SurvivalHead
+│   ├── swinunetr.py             # SwinUNETRMultitask (MONAI subclass)
+│   │                            # returns (seg_mask, bottleneck)
+│   ├── heads.py                 # TNHead (returns feat + logits) + SurvivalHead
 │   ├── cross_attention.py       # CrossAttentionFusion
-│   └── clinical_encoder.py     # MLP clinique (7 → 64 → d_model)
+│   └── clinical_encoder.py     # Clinical MLP (7 → 64 → d_model)
 │
 ├── utils/
 │   ├── losses.py                # DiceFocal + CrossEntropy + DeepHit
-│   ├── uncertainty.py           # UncertaintyWeighting (Kendall et al.)
 │   └── metrics.py               # C-index, Dice, Balanced Accuracy
 │
 └── config.py                    # d_model, T, N_warmup, lr, batch_size
@@ -149,8 +148,8 @@ class MultitaskModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.backbone   = SwinUNETRMultitask(...)    # swinunetr.py
-        self.t_head     = TNHead(...)                # heads.py — retourne (feat, logits)
-        self.n_head     = TNHead(...)                # heads.py — retourne (feat, logits)
+        self.t_head     = TNHead(...)                # heads.py — returns (feat, logits)
+        self.n_head     = TNHead(...)                # heads.py — returns (feat, logits)
         self.clin_mlp   = ClinicalMLP(...)           # clinical_encoder.py
         self.proj_tn    = nn.Linear(512, d_model)    # 256+256 → d_model
         self.cls_token  = nn.Parameter(torch.randn(1, 1, d_model))
@@ -158,19 +157,19 @@ class MultitaskModel(nn.Module):
         self.surv_head  = SurvivalHead(...)          # heads.py
 
     def forward(self, ct_pet, clinical):
-        # 1. Backbone → masque + bottleneck
+        # 1. Backbone → mask + bottleneck
         seg_mask, bottleneck = self.backbone(ct_pet)
 
-        # 2. T/N staging — features intermédiaires + logits
+        # 2. T/N staging — intermediate features + logits
         t_feat, t_logits = self.t_head(bottleneck)   # (B,256), (B,4)
         n_feat, n_logits = self.n_head(bottleneck)   # (B,256), (B,4)
 
-        # 3. Token TN depuis les features riches (pas les logits)
+        # 3. TN token from rich features (not logits)
         token_tn = self.proj_tn(
             torch.cat([t_feat, n_feat], dim=1)       # (B, 512)
         ).unsqueeze(1)                               # (B, 1, d_model)
 
-        # 4. Token clinique
+        # 4. Clinical token
         token_clin = self.clin_mlp(clinical)         # (B, 1, d_model)
 
         # 5. CLS token
@@ -179,10 +178,10 @@ class MultitaskModel(nn.Module):
         # 6. Queries
         Q = torch.cat([cls, token_clin, token_tn], dim=1)  # (B, 3, d_model)
 
-        # 7. Cross-attention — K=V depuis bottleneck aplati + projeté
+        # 7. Cross-attention — K=V from flattened + projected bottleneck
         cls_out = self.cross_attn(Q, bottleneck)     # (B, d_model)
 
-        # 8. Survie → logits bruts (softmax appliqué uniquement à l'inférence)
+        # 8. Survival → raw logits (softmax applied only at inference)
         surv_logits = self.surv_head(cls_out)        # (B, T)
 
         return {
@@ -198,9 +197,9 @@ class MultitaskModel(nn.Module):
 ## train.py
 
 ```python
-# Discrétisation des intervalles de temps par quantiles
+# Discretise time intervals by quantiles
 event_times = train_df.loc[train_df["event"]==1, "time"].values
-cuts = np.quantile(event_times, np.linspace(0, 1, T+1))  # T intervalles équiprobables
+cuts = np.quantile(event_times, np.linspace(0, 1, T+1))  # T equiprobable intervals
 
 model     = MultitaskModel(config)
 weighting = UncertaintyWeighting(n_tasks=4)
@@ -208,7 +207,7 @@ optimizer = Adam(list(model.parameters()) + list(weighting.parameters()))
 
 for epoch in range(total_epochs):
 
-    # Phase 1 — Warm-up : gel des têtes T/N et Survie
+    # Phase 1 — Warm-up: freeze T/N and Survival heads
     if epoch < config.N_warmup:
         for p in model.t_head.parameters():     p.requires_grad = False
         for p in model.n_head.parameters():     p.requires_grad = False
@@ -232,7 +231,7 @@ for epoch in range(total_epochs):
         optimizer.zero_grad()
         L_total.backward()
 
-        # Gradient clipping sur DeepHit pour éviter l'explosion
+        # Gradient clipping on DeepHit to prevent explosion
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()

@@ -1,45 +1,41 @@
-"""Têtes (heads) — staging T/N et survie discrète."""
-
 import torch
 import torch.nn as nn
 
-
+# Tête de classification pour le staging T ou N à partir du bottleneck
 class TNHead(nn.Module):
-    """
-    Tête de staging (T ou N).
-    Reçoit le bottleneck (B, C, D', H', W'), applique un Global Average Pooling
-    puis renvoie à la fois la feature intermédiaire (B, hidden) et les logits (B, num_classes).
-    La feature riche est utilisée pour la fusion cross-attention.
-    """
 
+    # Initialise le GAP, la couche cachée et le classifieur final
     def __init__(self, in_channels: int, hidden_dim: int = 256, num_classes: int = 4):
         super().__init__()
+        # Réduit le volume spatial (B, C, D', H', W') à (B, C) par moyenne globale
         self.gap = nn.AdaptiveAvgPool3d(1)
+        # Projette les features vers la dimension cachée avec activation et dropout
         self.feat = nn.Sequential(
             nn.Linear(in_channels, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
         )
+        # Projette la feature cachée vers les logits de classification
         self.classifier = nn.Linear(hidden_dim, num_classes)
 
+    # Renvoie la feature riche (B, hidden_dim) et les logits (B, num_classes)
     def forward(self, bottleneck: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # bottleneck: (B, C, D', H', W')
-        x = self.gap(bottleneck).flatten(1)     # (B, C)
-        feat = self.feat(x)                     # (B, hidden_dim)
-        logits = self.classifier(feat)          # (B, num_classes)
+        # Aplati le bottleneck en (B, C) via GAP
+        x = self.gap(bottleneck).flatten(1)
+        # Vecteur de feature intermédiaire utilisé pour la fusion cross-attention
+        feat = self.feat(x)
+        # Logits bruts pour la classification T ou N
+        logits = self.classifier(feat)
         return feat, logits
 
 
+# Tête de survie discrète qui produit des logits sur T intervalles temporels
 class SurvivalHead(nn.Module):
-    """
-    Tête de survie discrète (DeepHit-style).
-    Reçoit le token CLS enrichi par cross-attention (B, d_model)
-    et produit des logits bruts (B, T) sur T intervalles temporels.
-    Le softmax n'est appliqué qu'à l'inférence.
-    """
 
+    # Initialise le MLP d_model → hidden → T bins
     def __init__(self, d_model: int, hidden_dim: int = 256, n_time_bins: int = 10):
         super().__init__()
+        # Réseau fully-connected qui mappe le token CLS enrichi vers les logits de survie
         self.net = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
             nn.ReLU(inplace=True),
@@ -47,5 +43,6 @@ class SurvivalHead(nn.Module):
             nn.Linear(hidden_dim, n_time_bins),
         )
 
+    # Renvoie les logits bruts (B, T) ; le softmax est appliqué uniquement à l'inférence
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)

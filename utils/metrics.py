@@ -1,38 +1,34 @@
-"""Métriques d'évaluation : Dice, Balanced Accuracy, C-index."""
-
 import numpy as np
 import torch
 from sklearn.metrics import balanced_accuracy_score
 from lifelines.utils import concordance_index
 
-
+# Calcule la Balanced Accuracy en ignorant les labels −1 (inconnus)
 def balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Balanced Accuracy pour staging T ou N (entiers)."""
+    # Masque pour exclure les patients dont le stage est inconnu (label = −1)
     mask = y_true >= 0
     if mask.sum() == 0:
         return 0.0
     return float(balanced_accuracy_score(y_true[mask], y_pred[mask]))
 
 
+# Convertit les logits de survie (B, T) en score de risque scalaire (B,) par espérance inversée
 def discrete_risk_from_surv_logits(surv_logits: torch.Tensor) -> torch.Tensor:
-    """
-    Convertit (B, T) logits → score de risque scalaire (B,).
-    On utilise l'espérance pondérée 1 − CIF, ou plus simplement la somme softmax pondérée
-    par le rang temporel : un risque élevé = événement précoce attendu.
-    """
-    p = torch.softmax(surv_logits, dim=-1)              # (B, T)
+    # Distribution de probabilité softmax sur les T bins
+    p = torch.softmax(surv_logits, dim=-1)
+    # Nombre de bins temporels
     T = surv_logits.size(-1)
+    # Indices des bins (1..T) utilisés comme valeurs temporelles relatives
     bins = torch.arange(T, device=surv_logits.device, dtype=p.dtype) + 1.0
-    # Plus la masse est sur des bins précoces, plus le risque est élevé →
-    # risk = -E[bin]  (signe inversé pour que ↑ risk ↔ ↓ temps)
-    expected_bin = (p * bins).sum(dim=-1)               # (B,)
+    # Espérance du bin : élevée si l'événement est attendu tardivement (faible risque)
+    expected_bin = (p * bins).sum(dim=-1)
+    # Signe inversé : score élevé ↔ risque élevé ↔ événement attendu tôt
     return -expected_bin
 
 
+# Calcule le C-index de concordance (Harrell) entre scores de risque et temps de survie
 def c_index(risk_scores: np.ndarray, times: np.ndarray, events: np.ndarray) -> float:
-    """C-index. risk_scores : score élevé = risque élevé (donc temps court attendu)."""
     if events.sum() == 0:
         return 0.5
-    # lifelines : concordance_index(times, predicted_scores, event_observed)
-    # avec predicted_scores tel que scores élevés ↔ longue durée. Donc -risk.
+    # lifelines attend que scores élevés ↔ longue durée → on passe −risk
     return float(concordance_index(times, -risk_scores, events))
