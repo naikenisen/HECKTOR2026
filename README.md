@@ -18,70 +18,78 @@ This unified task reflects a realistic clinical workflow, integrating diagnosis,
 ## Pipeline 2026 pour la prédiction de la survie par End-to-End Multitask Learning
 
 ```
-CT+PET (2 canaux, 128³)
+  CT+PET (RAW)
+        |
+        | preprocessing (src/preprocessing.py)
+        |
+CT+PET (B, 2, 128, 128, 128)
         │
         ▼
-┌─────────────────────────────────┐
-|     SwinUNETR - pretrained      │
-└─────────────────┬───────────────┘
+    SwinUNETR (src/models.py)
+        │
+    L_Seg = Dice+Focal (utils/losses.py)
+        |
+        | segmentation & embeddings (src/segmentation_emb.py)
+        |
+        ├──► seg_mask (B, 3, D, H, W)
+        │
+        └──► bottleneck (B, C, D', H', W')
                   │
-                  ▼
-         Bottleneck (Latent z)
+        ┌─────────┼─────────┐
+        │                   │
+        ▼                   ▼
+T-Head (models.py)    N-Head (models.py)
+  (GAP + Linear)      (GAP + Linear)
+        │                   |
+        |                   |
+        |                   │
+        ▼                   ▼
+   Logits T (B,4)     Logits N (B,4)  
+        │                   │
+   L_T = CrossEnt     L_N = CrossEnt  (utils/losses.py)
+        │                   │
+        └─────────┬─────────┘
                   │
-  ┌───────────────┼───────────────┐
-  │               │               │
-  ▼               ▼               ▼
-Décodeur       T-Head          N-Head
-  |          (GAP+Linear)    (GAP+Linear)
-  │               │               │
-  ▼               ▼               ▼
-Masque          Logits T        Logits N
-(B,1,D,H,W)    (B, 4)          (B, 4)
-  │               │               │
-  │  L_Seg        │  L_T          │  L_N
-  │  (Dice+Focal) │  (CrossEnt)   │  (CrossEnt)
-  │               │               │
-  │               └───────┬───────┘
-  │                       │
-  │               Projection linéaire
-  │               nn.Linear(8, d_model)
-  │               token_tn (B, 1, d_model)
-  │                       │                    ┌──────────────────────────┐
-  │                       │                    │ Données Cliniques (B, 7) │
-  │                       │                    │ Âge, Sexe, HPV, M-stage..│
-  │                       │                    └────────────┬─────────────┘
-  │                       │                                 │
-  │                       │                    Tabular Transformer
-  │                       │                    (embedding par feature
-  │                       │                     + self-attention)
-  │                       │                    token_clin (B, 1, d_model)
-  │                       │                                 │
-  │                       ▼                                 ▼
-  │        ┌──────────────────────────────────────────────────────────┐
-  │        │              Cross-Attention Fusion                      │
-  │        │                                                          │
-  │        │  Q (B, 3, d_model) :                                     │
-  │        │  torch.cat([CLS token, token_clin, token_tn], dim=1)     │
-  │        │                                                          │
-  │        │  K / V (B, N+M, d_model) :                               │
-  │        │  torch.cat([Bottleneck z (flatten), Masque (flatten)])   │
-  │        │                                                          │
-  │        │  → nn.MultiheadAttention(Q, KV, KV)                      │
-  │        │  → CLS token enrichi (B, d_model)                        │
-  └───────►│                                                          │
-           └──────────────────────────┬───────────────────────────────┘
-                                      │
-                                      ▼
-                        Survival-Head (Discrete-Time)
-                         nn.Linear(d_model→256→T)
-                                      │
-                                      ▼
-                           logits bruts (B, T)
-                                      │   L_Surv (DeepHit)
-                                 softmax(logits)
-                                      │
-                                      ▼
-                          Risk Probabilities (B, T)
+                  |   tn classification and embeddings  (src/tn_staging_emb.py)
+                  |
+         nn.Linear(8, d_model)
+         token_tn (B, 1, d_model)
+                  │
+                  │          Clinical (B, 7)
+                  │               │
+                  │     MLP (7→64→d_model) (models.py)
+                  |               |
+                  |               | features enrichement (src/features_enrichement.py)
+                  │               │
+                  ▼               ▼
+        ┌─────────────────────────────────────┐
+        │         Cross-Attention Fusion      │
+        │         (models/cross_attention.py) │
+        │                                     │
+        │  Q (B, 3, d_model) :                │
+        │  cat([CLS, token_clin, token_tn])   │
+        │                                     │
+        │  KV (B, N+M, d_model) :             │
+        │  cat([bottleneck flatten,           │
+        │       seg_mask flatten])            │
+        │                                     │
+        │  → MultiheadAttention(Q, KV, KV)    │
+        │  → CLS token enrichi (B, d_model)   │
+        └─────────────────  ──────────────────┘
+                          |
+                          ▼
+                Survival Head nn.Linear(d_model → 256 → T) (src/models.py)
+                          │
+                          |  survival prediction (src/survival.py)
+                          |
+                logits bruts (B, T)
+                          |
+                          | L_Surv = DeepHit (utils/losses/py)
+                          │
+                      softmax(logits)
+                          | 
+                          ▼
+                  Risk Probabilities (B, T)
 ═══════════════════════════════════════════════════════════════════════════════
 
 FONCTION DE PERTE TOTALE (End-to-End) :
