@@ -45,44 +45,31 @@ class LoadNpzDictd(MapTransform):
         return d
 
 
-def get_train_transforms(config):
+def get_multitask_train_transforms(config):
     """
-    Get the transforms that are fast and should be run on-the-fly for training.
-    This pipeline starts by loading the preprocessed .npz files.
-    
-    Args:
-        config: A configuration object with parameters like `spatial_size`,
-                `use_augmentation`, `aug_probability`, and `num_samples`.
+    Variante multitâche : conserve clinical/t_label/n_label/time/event/case_id.
+    `RandCropByLabelClassesd` est conservé pour échantillonner près des tumeurs.
     """
     keys = ["ct", "pet", "label"]
-    
-    # Start with our custom loader.
-    transforms = [
-        LoadNpzDictd(keys=keys),
-        # Note: EnsureChannelFirstd is not needed here because the channel 
-        # dimension was saved during the preprocessing step.
-    ]
+    keep = ["image", "label", "clinical", "t_label", "n_label", "time", "event", "case_id"]
 
-    # --- Training: Random Cropping and Augmentation ---
-    
-    # 1. Create random patches from the full-resolution preprocessed image.
-    # This is very fast as it operates on data already in memory.
+    transforms = [LoadNpzDictd(keys=keys)]
+
     transforms.append(
         RandCropByLabelClassesd(
             keys=keys,
             label_key="label",
-            spatial_size=config.spatial_size,  # e.g., (192, 192, 192)
-            ratios=[0.1, 0.45, 0.45], # Example ratios, tune as needed
+            spatial_size=config.spatial_size,
+            ratios=[0.1, 0.45, 0.45],
             num_classes=3,
-            num_samples=3,
+            num_samples=1,        # 1 sample/batch item pour préserver l'alignement tabulaire
             allow_missing_keys=True,
             warn=False,
         )
     )
 
     if config.use_augmentation:
-        # 2. Apply random augmentations to the small patches.
-        aug_transforms = [
+        transforms.extend([
             RandFlipd(keys=keys, spatial_axis=[0, 1, 2], prob=config.aug_probability),
             RandScaleIntensityd(keys=["ct"], factors=0.1, prob=config.aug_probability),
             RandShiftIntensityd(keys=["ct"], offsets=0.1, prob=config.aug_probability),
@@ -90,38 +77,27 @@ def get_train_transforms(config):
             RandGaussianSmoothd(
                 keys=["ct"],
                 sigma_x=(0.5, 1.15), sigma_y=(0.5, 1.15), sigma_z=(0.5, 1.15),
-                prob=config.aug_probability
+                prob=config.aug_probability,
             ),
-        ]
-        transforms.extend(aug_transforms)
+        ])
 
-    # 3. Final steps: combine CT and PET into a single multi-channel image and ensure type.
-    final_steps = [
+    transforms.extend([
         ConcatItemsd(keys=["ct", "pet"], name="image", dim=0),
-        SelectItemsd(keys=["image", "label"]),
-        EnsureTyped(keys=["image", "label"])
-    ]
-    transforms.extend(final_steps)
-        
-    return Compose(transforms)
-
-def get_validation_transforms():
-    """
-    Get the transforms for validation or testing.
-    This pipeline loads the full preprocessed .npz files without applying
-    any random cropping or augmentations.
-    """
-    keys = ["ct", "pet", "label"]
-
-    return Compose([
-        # 1. Load the full preprocessed data from .npz files.
-        LoadNpzDictd(keys=keys),
-
-        # 2. Combine the CT and PET modalities into a single multi-channel tensor.
-        ConcatItemsd(keys=["ct", "pet"], name="image", dim=0),
-        SelectItemsd(keys=["image", "label"]),
-
-        # 3. Ensure the final output keys ('image' and 'label') are tensors.
+        SelectItemsd(keys=keep),
         EnsureTyped(keys=["image", "label"]),
     ])
+    return Compose(transforms)
+
+
+def get_multitask_validation_transforms():
+    """Variante multitâche pour la validation : pas de crop aléatoire."""
+    keys = ["ct", "pet", "label"]
+    keep = ["image", "label", "clinical", "t_label", "n_label", "time", "event", "case_id"]
+    return Compose([
+        LoadNpzDictd(keys=keys),
+        ConcatItemsd(keys=["ct", "pet"], name="image", dim=0),
+        SelectItemsd(keys=keep),
+        EnsureTyped(keys=["image", "label"]),
+    ])
+
 

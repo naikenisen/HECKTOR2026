@@ -17,56 +17,81 @@ seg_loss = DiceFocalLoss(
 t_loss = nn.CrossEntropyLoss()
 n_loss = nn.CrossEntropyLoss()
 
-# Survival — DeepHit (Cox likelihood + pairwise ranking)
-_EPSILON = 1e-8
+# Survival — DeepHit discret (NLL + ranking sur la CIF)
+class DeepHitDiscreteLoss(nn.Module):
+    """
+    DeepHit discret pour survie en temps discrétisé.
 
+    Inputs
+    ------
+    logits       : (B, T)            logits bruts du survival head
+    times        : (B,)              temps de suivi (en années / mois — peu importe)
+    events       : (B,)              indicateur d'événement (1=relapse, 0=censuré)
+    bin_edges    : (T+1,)            bornes des intervalles temporels (quantiles fit sur train)
 
-class DeepHitLoss(nn.Module):
-    """DeepHit-style loss: negative partial log-likelihood + ranking term."""
+    Loss = L_NLL + α · L_rank
+      L_NLL  : -log p(bin_event | x) pour les événements observés
+               -log P(T > bin_censor | x) pour les censurés
+      L_rank : pénalise un classement incorrect du CIF entre paires comparables
+    """
 
-    def __init__(self, ranking_weight: float = 0.2, ranking_scale: float = 1.0):
+    def __init__(self, alpha: float = 0.2, sigma: float = 0.1):
         super().__init__()
-        self.ranking_weight = ranking_weight
-        self.ranking_scale  = ranking_scale
+        self.alpha = alpha
+        self.sigma = sigma
 
-    def forward(self, risk_scores: torch.Tensor,
-                survival_times: torch.Tensor,
-                event_indicators: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def time_to_bin(times: torch.Tensor, bin_edges: torch.Tensor) -> torch.Tensor:
+        """Retourne l'index du bin (0..T-1) pour chaque temps."""
+        T = bin_edges.numel() - 1
+        # torch.bucketize : retourne l'index de l'intervalle (1..T), on clamp → 0..T-1
+        idx = torch.bucketize(times, bin_edges[1:-1], right=False)
+        return idx.clamp(0, T - 1).long()
 
-        if event_indicators.sum() == 0:
-            return torch.tensor(0.01, device=risk_scores.device, requires_grad=True)
+    def forward(self, logits: torch.Tensor, times: torch.Tensor,
+                events: torch.Tensor, bin_edges: torch.Tensor) -> torch.Tensor:
+        device = logits.device
+        B, T = logits.shape
+        pmf = torch.softmax(logits, dim=-1)                          # (B, T)
+        cif = torch.cumsum(pmf, dim=-1)                              # (B, T)
 
-        device     = risk_scores.device
-        batch_size = len(survival_times)
+        k = self.time_to_bin(times, bin_edges)                       # (B,)
+        events_b = events.bool()
 
-        # Likelihood
-        sorted_idx    = torch.argsort(survival_times, descending=True)
-        sorted_scores = risk_scores[sorted_idx]
-        sorted_events = event_indicators[sorted_idx]
+        # ---- NLL ----
+        eps = 1e-8
+        p_event = pmf.gather(1, k.unsqueeze(1)).squeeze(1)           # (B,)
+        # Survie au-delà du bin k pour les censurés : 1 - CIF[k]
+        s_censor = 1.0 - cif.gather(1, k.unsqueeze(1)).squeeze(1)    # (B,)
 
-        ll = torch.tensor(0.0, device=device, requires_grad=True)
-        for i in range(batch_size):
-            if sorted_events[i] == 1:
-                ll = ll + sorted_scores[i] - torch.logsumexp(sorted_scores[i:], dim=0)
-        ll = -ll / (event_indicators.sum() + _EPSILON)
+        nll_event  = -torch.log(p_event[events_b].clamp_min(eps)).sum() \
+                     if events_b.any() else torch.tensor(0.0, device=device)
+        nll_censor = -torch.log(s_censor[~events_b].clamp_min(eps)).sum() \
+                     if (~events_b).any() else torch.tensor(0.0, device=device)
+        l_nll = (nll_event + nll_censor) / max(B, 1)
 
-        # Ranking
-        rl, pairs = torch.tensor(0.0, device=device, requires_grad=True), 0
-        for i in range(batch_size):
-            for j in range(i + 1, batch_size):
-                if event_indicators[i] == 1 and survival_times[i] < survival_times[j]:
-                    rl = rl + torch.exp(self.ranking_scale * (risk_scores[j] - risk_scores[i]))
-                    pairs += 1
-                elif event_indicators[j] == 1 and survival_times[j] < survival_times[i]:
-                    rl = rl + torch.exp(self.ranking_scale * (risk_scores[i] - risk_scores[j]))
-                    pairs += 1
-        if pairs > 0:
-            rl = rl / pairs
+        # ---- Ranking ----
+        # Paires (i, j) tel que événement_i = 1 et t_i < t_j (j peut être censuré).
+        # On veut CIF_i(k_i) > CIF_j(k_i) → on pénalise sinon.
+        if events_b.any():
+            cif_at_ki = cif.gather(1, k.unsqueeze(1))                # (B, 1)
+            # cif_i_at_ki : (B,) ; cif_j_at_ki : besoin (B, B) via index k_i pour chaque j
+            #   cif_j_at_ki[i, j] = cif[j, k_i]
+            ki_expand = k.view(1, B).expand(B, B)                    # (B_i, B_j) chacun = k_i
+            cif_j_at_ki = cif.unsqueeze(0).expand(B, B, T).gather(2, ki_expand.unsqueeze(-1)).squeeze(-1)
+            #   .unsqueeze(0) : (1, B, T)  →  expand (B_i, B_j, T)
+            cif_i_at_ki = cif_at_ki.expand(B, B)                     # (B_i, B_j)
 
-        return ll + self.ranking_weight * rl
+            time_mat  = times.view(B, 1) < times.view(1, B)          # i a un temps < j
+            valid     = events_b.view(B, 1) & time_mat               # (B_i, B_j)
 
+            diff = (cif_i_at_ki - cif_j_at_ki)                       # > 0 si bien classé
+            rank_loss = torch.exp(-diff / self.sigma)
+            rank_loss = (rank_loss * valid.float()).sum() / (valid.float().sum() + eps)
+        else:
+            rank_loss = torch.tensor(0.0, device=device)
 
-surv_loss = DeepHitLoss(ranking_weight=0.2)
+        return l_nll + self.alpha * rank_loss
 
 # Uncertainty Weighting — Kendall et al. 2018
 class UncertaintyWeightedLoss(nn.Module):

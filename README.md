@@ -3,7 +3,6 @@
 ## Approches précédentes
 - Les trois tâches du challenge (segmentation, staging, pronostic) sont **complètement isolées** : aucune information ne circule entre elles.
 - L'image est dégradée à 96³, sans information sur la localisation tumorale.
-- Pas d'utilisation des masques de segmentation pour le pronostic.
 
 ## Consignes 2026
 Participants are invited to develop a multimodal pipeline leveraging FDG PET, CT, and clinical data to:

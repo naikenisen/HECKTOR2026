@@ -60,7 +60,16 @@ class SwinUNETRConfig:
             os.makedirs(d, exist_ok=True)
 
 
-class SwinUNETRModel(nn.Module):
+class SwinUNETRMultitask(nn.Module):
+    """
+    SwinUNETR exposant à la fois :
+      - le masque de segmentation final (B, num_classes, D, H, W)
+      - la feature bottleneck du SwinViT (B, C, D', H', W')  — feature la plus profonde
+
+    On réutilise le SwinUNETR de MONAI : son attribut `swinViT` renvoie la liste
+    des feature maps hiérarchiques [stage0, stage1, stage2, stage3, stage4].
+    Le bottleneck correspond au dernier élément (downscale ×32, C=feature_size*16).
+    """
 
     def __init__(self, config: SwinUNETRConfig):
         super().__init__()
@@ -74,36 +83,35 @@ class SwinUNETRModel(nn.Module):
             use_checkpoint=config.use_checkpoint,
         )
 
-        weights = torch.load(config.pretrained_path, map_location="cpu", weights_only=False)
-        if "state_dict" in weights:
-            weights = weights["state_dict"]
-        self.swinunetr.load_from(weights=weights)
-        print(f"[SwinUNETR] Loaded pretrained encoder from '{config.pretrained_path}'. Decoder initialised randomly.")
+        if config.pretrained_path and os.path.exists(config.pretrained_path):
+            weights = torch.load(config.pretrained_path, map_location="cpu", weights_only=False)
+            if "state_dict" in weights:
+                weights = weights["state_dict"]
+            self.swinunetr.load_from(weights=weights)
+            print(f"[SwinUNETRMultitask] SSL weights chargés depuis '{config.pretrained_path}'.")
+        else:
+            print(f"[SwinUNETRMultitask] ATTENTION : poids SSL introuvables ({config.pretrained_path}). Décodeur init aléatoire.")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.swinunetr(x)
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Reproduit le forward de monai.networks.nets.SwinUNETR mais expose en plus
+        le bottleneck. Cf. https://github.com/Project-MONAI/MONAI swinunetr.py.
+        """
+        net = self.swinunetr
+        hidden_states_out = net.swinViT(x, net.normalize)
+        # hidden_states_out = [stage0, stage1, stage2, stage3, bottleneck]
+        bottleneck = hidden_states_out[4]
 
-    def save_checkpoint(self, path: str, epoch: int, optimizer_state: dict = None, **kwargs):
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": self.state_dict(),
-            "model_config": self.config.__dict__,
-            **kwargs,
-        }
-        if optimizer_state:
-            checkpoint["optimizer_state_dict"] = optimizer_state
-        torch.save(checkpoint, path)
+        enc0 = net.encoder1(x)
+        enc1 = net.encoder2(hidden_states_out[0])
+        enc2 = net.encoder3(hidden_states_out[1])
+        enc3 = net.encoder4(hidden_states_out[2])
+        dec4 = net.encoder10(hidden_states_out[4])
+        dec3 = net.decoder5(dec4, hidden_states_out[3])
+        dec2 = net.decoder4(dec3, enc3)
+        dec1 = net.decoder3(dec2, enc2)
+        dec0 = net.decoder2(dec1, enc1)
+        out  = net.decoder1(dec0, enc0)
+        seg_logits = net.out(out)
 
-    def load_checkpoint(self, path: str, device: str = "cpu") -> dict:
-        checkpoint = torch.load(path, map_location=device)
-        self.load_state_dict(checkpoint["model_state_dict"])
-        return checkpoint
-
-    def get_parameters(self) -> dict:
-        total     = sum(p.numel() for p in self.parameters())
-        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        return {
-            "total_parameters":     total,
-            "trainable_parameters": trainable,
-            "model_size_mb":        total * 4 / (1024 ** 2),
-        }
+        return seg_logits, bottleneck
