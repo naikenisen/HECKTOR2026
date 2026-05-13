@@ -16,8 +16,7 @@ sys.path.insert(0, _root)
 from config import MultitaskConfig
 from src.model import MultitaskModel
 from src.dataset import get_multitask_dataloaders
-from utils.losses import seg_loss, t_loss, n_loss, DeepHitDiscreteLoss
-from utils.uncertainty import UncertaintyWeighting
+from utils.losses import seg_loss, t_loss, n_loss, DeepHitDiscreteLoss, UncertaintyWeightedLoss as UncertaintyWeighting
 from utils.metrics import (
     balanced_accuracy,
     discrete_risk_from_surv_logits,
