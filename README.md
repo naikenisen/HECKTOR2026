@@ -65,7 +65,7 @@ CT+PET (2 canaux, 128³ ou 256³)
   │               │               │
   ▼               ▼               ▼
 Décodeur       T-Head          N-Head
-(Mamba)        (GAP+Linear)    (GAP+Linear)
+  |          (GAP+Linear)    (GAP+Linear)
   │               │               │
   ▼               ▼               ▼
 Masque          Logits T        Logits N

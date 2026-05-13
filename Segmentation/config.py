@@ -45,7 +45,7 @@ class SwinUNETRConfig:
     feature_size: int = 48
     use_checkpoint: bool = True   # gradient checkpointing — saves VRAM during training
 
-    # Pretrained weights — MONAI SSL pretrained SwinViT encoder
+    # MONAI SSL pretrained SwinViT encoder (required)
     # Download: https://github.com/Project-MONAI/MONAI-extra-test-data/releases/download/0.8.1/model_swinvit.pt
     pretrained_path: str = "model_swinvit.pt"
 

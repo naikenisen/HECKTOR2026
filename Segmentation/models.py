@@ -1,6 +1,5 @@
-"""SwinUNETR model using MONAI, optionally initialized from SSL pretrained weights."""
+"""SwinUNETR model using MONAI, initialized from SSL pretrained weights."""
 
-import os
 import torch
 import torch.nn as nn
 from monai.networks.nets import SwinUNETR
@@ -20,20 +19,11 @@ class SwinUNETRModel(nn.Module):
             use_checkpoint=config.use_checkpoint,
         )
 
-        if config.pretrained_path and os.path.exists(config.pretrained_path):
-            self._load_pretrained(config.pretrained_path)
-        elif config.pretrained_path:
-            print(f"[SwinUNETR] Pretrained weights not found at '{config.pretrained_path}' — training from scratch.")
-
-    def _load_pretrained(self, path: str):
-        """Load SSL pretrained encoder weights via MONAI's load_from().
-        Only the SwinViT encoder is pretrained; the decoder starts randomly.
-        """
-        weights = torch.load(path, map_location="cpu", weights_only=False)
+        weights = torch.load(config.pretrained_path, map_location="cpu", weights_only=False)
         if "state_dict" in weights:
             weights = weights["state_dict"]
         self.swinunetr.load_from(weights=weights)
-        print(f"[SwinUNETR] Loaded pretrained encoder from '{path}'. Decoder initialised randomly.")
+        print(f"[SwinUNETR] Loaded pretrained encoder from '{config.pretrained_path}'. Decoder initialised randomly.")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.swinunetr(x)
