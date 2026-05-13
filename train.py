@@ -19,7 +19,6 @@ sys.path.insert(0, _root)  # utils/, src/
 from src.models import SwinUNETRConfig, SwinUNETRModel
 from src.dataloader import get_dataloaders
 from utils.losses import get_loss_function
-from utils.logging import setup_logging
 
 
 ## REF 1: Create a single, efficient evaluation function.
@@ -129,30 +128,27 @@ def main():
     if args.device:
         config.device = args.device
     
-    # Setup logging
-    logger = setup_logging(config.log_dir)
-    logger.info("Starting training...")
-    logger.info(f"Configuration: {config}")
-    
+    print("Starting training...")
+    print(f"Configuration: {config}")
+
     # Setup device
-    ## REF 4: Simplified device setup logic.
     if config.device == "cuda" and torch.cuda.is_available():
         device = torch.device(f"cuda:{args.cuda_device}")
         torch.cuda.set_device(device)
-        logger.info(f"Using {device}: {torch.cuda.get_device_name(device)}")
+        print(f"Using {device}: {torch.cuda.get_device_name(device)}")
     else:
         device = torch.device("cpu")
         if config.device == "cuda":
-            logger.warning("CUDA not available, falling back to CPU.")
-        logger.info(f"Using device: {device}")
+            print("CUDA not available, falling back to CPU.")
+        print(f"Using device: {device}")
 
     # Create model
     model = SwinUNETRModel(config).to(device)
-    logger.info(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
-    
+    print(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
+
     # Setup data
     train_loader, val_loader = get_dataloaders(config)
-    logger.info(f"Data loaded: {len(train_loader)} train batches, {len(val_loader)} val batches")
+    print(f"Data loaded: {len(train_loader)} train batches, {len(val_loader)} val batches")
     
     # Setup training components
     criterion = get_loss_function("dice_ce")
@@ -178,15 +174,15 @@ def main():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
         best_val_dice = checkpoint.get("best_dice", 0.0)
-        logger.info(f"Resumed from epoch {start_epoch}, previous best Dice: {best_val_dice:.4f}")
+        print(f"Resumed from epoch {start_epoch}, previous best Dice: {best_val_dice:.4f}")
 
     # Training loop
     for epoch in range(start_epoch, config.num_epochs):
-        logger.info(f"Epoch {epoch}/{config.num_epochs}")
+        print(f"Epoch {epoch}/{config.num_epochs}")
         
         # Train for one epoch and log the loss
         train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
-        logger.info(f"Train - Loss: {train_loss:.4f}")
+        print(f"Train - Loss: {train_loss:.4f}")
         
         # Log training loss to TensorBoard every epoch
         if writer:
@@ -198,11 +194,11 @@ def main():
         should_validate = (epoch + 1) % 5 == 0 or (epoch + 1) == config.num_epochs
 
         if should_validate:
-            logger.info("Running validation with sliding window inference...")
+            print("Running validation with sliding window inference...")
             val_loss, val_dice = evaluate_epoch(
                 model, val_loader, criterion, dice_metric, device, config, use_sliding_window=True
             )
-            logger.info(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}")
+            print(f"Val   - Loss: {val_loss:.4f}, Dice: {val_dice:.4f}")
             
             if writer:
                 writer.add_scalar("Loss/validation", val_loss, epoch)
@@ -211,7 +207,7 @@ def main():
         # PolyLR scheduler steps every epoch, regardless of validation
         scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
-        logger.info(f"Learning rate: {current_lr:.6f}")
+        print(f"Learning rate: {current_lr:.6f}")
         
         # Log learning rate to TensorBoard
         if writer:
@@ -222,7 +218,7 @@ def main():
             best_val_dice = val_dice
             best_path = os.path.join(config.checkpoint_dir, "best_model.pth")
             model.save_checkpoint(best_path, epoch, optimizer.state_dict(), best_dice=best_val_dice)
-            logger.info(f"New best model saved with Dice: {best_val_dice:.4f}")
+            print(f"New best model saved with Dice: {best_val_dice:.4f}")
 
         # --- Checkpointing ---
         # Save last model checkpoint periodically or at the end of training
@@ -234,9 +230,9 @@ def main():
         if should_save_checkpoint or (epoch + 1) == config.num_epochs:
             last_model_path = os.path.join(config.checkpoint_dir, "last_model.pth")
             model.save_checkpoint(last_model_path, epoch, optimizer.state_dict(), best_dice=best_val_dice)
-            logger.info(f"Saved last model checkpoint at epoch {epoch}")
+            print(f"Saved last model checkpoint at epoch {epoch}")
 
-    logger.info("Training completed!")
+    print("Training completed!")
     if writer:
         writer.close()
 
