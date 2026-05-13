@@ -18,7 +18,7 @@ sys.path.insert(0, _root)  # utils/, src/
 
 from src.models import SwinUNETRConfig, SwinUNETRModel
 from src.dataloader import get_dataloaders
-from utils.losses import get_loss_function
+from utils.losses import seg_loss
 
 
 ## REF 1: Create a single, efficient evaluation function.
@@ -151,7 +151,7 @@ def main():
     print(f"Data loaded: {len(train_loader)} train batches, {len(val_loader)} val batches")
     
     # Setup training components
-    criterion = get_loss_function("dice_ce")
+    criterion = seg_loss
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     
     # Create PolyLR scheduler
