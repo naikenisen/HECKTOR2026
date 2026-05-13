@@ -14,13 +14,10 @@ from monai.transforms import AsDiscrete
 from monai.data import decollate_batch
 
 _root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _root)                                        # utils/
-sys.path.insert(0, os.path.join(_root, "Segmentation"))          # config, models, transforms
-sys.path.insert(0, os.path.join(_root, "src"))                   # dataloader
+sys.path.insert(0, _root)  # utils/, src/
 
-from config import SwinUNETRConfig
-from models import SwinUNETRModel
-from dataloader import get_dataloaders
+from src.models import SwinUNETRConfig, SwinUNETRModel
+from src.dataloader import get_dataloaders
 from utils.losses import get_loss_function
 from utils.logging import setup_logging
 

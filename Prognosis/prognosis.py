@@ -1,4 +1,5 @@
 import os
+import sys
 import pandas as pd
 import numpy as np
 import torch
@@ -15,6 +16,9 @@ from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityd, ToTensord, Resized
 )
 from monai.networks.nets import resnet18
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils"))
+from losses import DeepHitLoss
 
 # =============================================================================
 # Configuration and Constants
@@ -109,58 +113,6 @@ class SurvivalContrastiveLoss(nn.Module):
             loss = loss + dissimilar_loss
         
         return loss
-
-class DeepHitLoss(nn.Module):
-    """
-    DeepHit-style loss combining likelihood and ranking components.
-    """
-    def __init__(self, ranking_weight=0.2, ranking_scale=1.0):
-        super().__init__()
-        self.ranking_weight = ranking_weight
-        self.ranking_scale = ranking_scale
-
-    def forward(self, risk_scores, survival_times, event_indicators):
-        if event_indicators.sum() == 0:
-            return torch.tensor(0.01, device=risk_scores.device, requires_grad=True)
-        
-        device = risk_scores.device
-        batch_size = len(survival_times)
-        
-        # Likelihood component
-        sorted_indices = torch.argsort(survival_times, descending=True)
-        sorted_risk_scores = risk_scores[sorted_indices]
-        sorted_events = event_indicators[sorted_indices]
-        
-        likelihood_loss = torch.tensor(0.0, device=device, requires_grad=True)
-        
-        for i in range(batch_size):
-            if sorted_events[i] == 1:
-                risk_set_scores = sorted_risk_scores[i:]
-                numerator = sorted_risk_scores[i]
-                denominator = torch.logsumexp(risk_set_scores, dim=0)
-                likelihood_loss = likelihood_loss + numerator - denominator
-        
-        likelihood_loss = -likelihood_loss / (event_indicators.sum() + CONCORDANCE_EPSILON)
-        
-        # Ranking component
-        ranking_loss = torch.tensor(0.0, device=device, requires_grad=True)
-        pair_count = 0
-        
-        for i in range(batch_size):
-            for j in range(i + 1, batch_size):
-                if event_indicators[i] == 1 and survival_times[i] < survival_times[j]:
-                    risk_difference = risk_scores[j] - risk_scores[i]
-                    ranking_loss = ranking_loss + torch.exp(self.ranking_scale * risk_difference)
-                    pair_count += 1
-                elif event_indicators[j] == 1 and survival_times[j] < survival_times[i]:
-                    risk_difference = risk_scores[i] - risk_scores[j]
-                    ranking_loss = ranking_loss + torch.exp(self.ranking_scale * risk_difference)
-                    pair_count += 1
-        
-        if pair_count > 0:
-            ranking_loss = ranking_loss / pair_count
-        
-        return likelihood_loss + self.ranking_weight * ranking_loss
 
 # =============================================================================
 # Dataset Class

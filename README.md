@@ -6,39 +6,6 @@
 - Pas d'utilisation des masques de segmentation pour le pronostic.
 ---
 
-## Pipeline précédente pour la prédiction de la survie
-
-```
-CT+PET (2 ch, 96³)              Clinical (clin_dim)
-        │                                │
-        ▼                                ▼
-   ResNet-18 3D                    MLP clinique
-   (FC → Identity)              (64→32, BN, Dropout)
-        │                                │
-        ▼                                ▼
-   f_img (512)                      f_clin (32)
-        │                                │
-        └──────────► Concat ◄────────────┘
-                       │
-                  544 dims
-                       │
-                       ▼
-                  MLP fusion
-              (544→512→256→128)
-                       │
-                       ▼
-                features (128)
-                  │        │
-                  ▼        ▼
-            Risk head   ┌─ BaggedIcareSurvival
-            (128→1)     │  (icare, post-hoc,
-                  │     │   non différentiable)
-                  ▼     │
-        DeepHit+Contrast│
-              loss      ▼
-                  risk_score final
-```
-
 ## Consignes 2026
 Participants are invited to develop a multimodal pipeline leveraging FDG PET, CT, and clinical data to:
 
@@ -51,11 +18,11 @@ This unified task reflects a realistic clinical workflow, integrating diagnosis,
 ## Pipeline 2026 pour la prédiction de la survie par End-to-End Multitask Learning
 
 ```
-CT+PET (2 canaux, 128³ ou 256³)
+CT+PET (2 canaux, 128³)
         │
         ▼
 ┌─────────────────────────────────┐
-|     SwinUNETR - pretraind       │
+|     SwinUNETR - pretrained      │
 └─────────────────┬───────────────┘
                   │
                   ▼
@@ -137,9 +104,9 @@ SORTIES CLINIQUES — Rapport généré par patient
   │                                                                 │
   │  2. STAGING TN                                                  │
   │     • T-stage prédit : T1 / T2 / T3 / T4                        │
-  │       avec probabilités : [0.05, 0.72, 0.18, 0.05]             │
+  │       avec probabilités : [0.05, 0.72, 0.18, 0.05]              │
   │     • N-stage prédit : N0 / N1 / N2 / N3                        │
-  │       avec probabilités : [0.10, 0.65, 0.20, 0.05]             │
+  │       avec probabilités : [0.10, 0.65, 0.20, 0.05]              │
   │                                                                 │
   │  3. PRONOSTIC DE SURVIE                                         │
   │     • C-index (évaluation de la discrimination)                 │
@@ -150,10 +117,10 @@ SORTIES CLINIQUES — Rapport généré par patient
   │       30% │      ╭──╯                                           │
   │       20% │   ╭──╯                                              │
   │       10% │╭──╯                                                 │
-  │        0% └──────────────────────── Temps                      │
+  │        0% └──────────────────────── Temps                       │
   │              6m  12m  18m  24m  36m                             │
   │                                                                 │
-  │     • Probabilité cumulée de récidive à 1 an : XX%             │
-  │     • Probabilité cumulée de récidive à 2 ans : XX%            │
+  │     • Probabilité cumulée de récidive à 1 an : XX%              │
+  │     • Probabilité cumulée de récidive à 2 ans : XX%             │
   └─────────────────────────────────────────────────────────────────┘
 ```
