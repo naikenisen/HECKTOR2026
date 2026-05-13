@@ -55,14 +55,7 @@ CT+PET (2 canaux, 128³ ou 256³)
         │
         ▼
 ┌─────────────────────────────────┐
-     SegResNet - vista3d.pt
-              ou
-           ViT 3DINO
-              ou
-      SwinUNETR - pretraind
-              ou
- SegMamba Encoder Pré-entraîné SSL
-│      (Poids gelés + LoRA)       │
+|     SwinUNETR - pretraind       │
 └─────────────────┬───────────────┘
                   │
                   ▼

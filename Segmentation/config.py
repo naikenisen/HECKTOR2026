@@ -1,4 +1,4 @@
-"""SegResNet configuration — vista3d.pt pretrained backbone."""
+"""SwinUNETR configuration — MONAI SSL pretrained encoder."""
 
 import os
 from dataclasses import dataclass
@@ -6,7 +6,7 @@ from typing import Tuple
 
 
 @dataclass
-class SegResNetConfig:
+class SwinUNETRConfig:
 
     # Data paths
     data_root: str = "/path/to/hecktor2026_training"
@@ -14,14 +14,14 @@ class SegResNetConfig:
     train_labels_dir: str = "labelsTr_resampled_cropped_npy"
 
     # Data properties
-    input_channels: int = 2                          # CT + PET
-    num_classes: int = 3                             # bg + GTVp + GTVn
+    input_channels: int = 2                           # CT + PET
+    num_classes: int = 3                              # bg + GTVp + GTVn
     spatial_size: Tuple[int, int, int] = (128, 128, 128)
 
     # Training
     batch_size: int = 2
-    learning_rate: float = 1e-2
-    weight_decay: float = 3e-5
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
     num_epochs: int = 350
     poly_lr_power: float = 0.9
     poly_lr_min_lr: float = 1e-6
@@ -38,19 +38,16 @@ class SegResNetConfig:
     use_tensorboard: bool = True
 
     # Output
-    experiment_name: str = "segresnet"
+    experiment_name: str = "swinunetr"
     output_dir: str = "experiments"
 
-    # Architecture — must match vista3d.pt checkpoint
-    spatial_dims: int = 3
-    init_filters: int = 32          # vista3d uses 32
-    blocks_down: tuple = (1, 2, 2, 4)
-    blocks_up: tuple = (1, 1, 1)
-    dropout_prob: float = 0.2
-    upsample_mode: str = "nontrainable"
+    # Architecture — must match pretrained checkpoint (feature_size=48 for MONAI SSL)
+    feature_size: int = 48
+    use_checkpoint: bool = True   # gradient checkpointing — saves VRAM during training
 
-    # Pretrained weights (set to None to train from scratch)
-    pretrained_path: str = "vista3d.pt"
+    # Pretrained weights — MONAI SSL pretrained SwinViT encoder
+    # Download: https://github.com/Project-MONAI/MONAI-extra-test-data/releases/download/0.8.1/model_swinvit.pt
+    pretrained_path: str = "model_swinvit.pt"
 
     def __post_init__(self):
         self.experiment_dir = os.path.join(self.output_dir, self.experiment_name)

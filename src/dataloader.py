@@ -1,7 +1,7 @@
 import os
 import random
 from monai.data import DataLoader, CacheDataset
-from .transforms import get_train_transforms, get_validation_transforms
+from transforms import get_train_transforms, get_validation_transforms
 from typing import Tuple
 
 

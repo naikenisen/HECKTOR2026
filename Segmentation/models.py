@@ -1,68 +1,42 @@
-"""SegResNet model using MONAI, optionally initialized from vista3d.pt weights."""
+"""SwinUNETR model using MONAI, optionally initialized from SSL pretrained weights."""
 
 import os
 import torch
 import torch.nn as nn
-from monai.networks.nets import SegResNet
+from monai.networks.nets import SwinUNETR
 
 
-class SegResNetModel(nn.Module):
+class SwinUNETRModel(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.config = config
 
-        self.segresnet = SegResNet(
-            spatial_dims=config.spatial_dims,
-            init_filters=config.init_filters,
+        self.swinunetr = SwinUNETR(
+            img_size=config.spatial_size,
             in_channels=config.input_channels,
             out_channels=config.num_classes,
-            dropout_prob=config.dropout_prob,
-            blocks_down=config.blocks_down,
-            blocks_up=config.blocks_up,
-            upsample_mode=config.upsample_mode,
+            feature_size=config.feature_size,
+            use_checkpoint=config.use_checkpoint,
         )
 
         if config.pretrained_path and os.path.exists(config.pretrained_path):
             self._load_pretrained(config.pretrained_path)
         elif config.pretrained_path:
-            print(f"[SegResNet] Pretrained weights not found at '{config.pretrained_path}' — training from scratch.")
+            print(f"[SwinUNETR] Pretrained weights not found at '{config.pretrained_path}' — training from scratch.")
 
     def _load_pretrained(self, path: str):
+        """Load SSL pretrained encoder weights via MONAI's load_from().
+        Only the SwinViT encoder is pretrained; the decoder starts randomly.
         """
-        Load vista3d.pt weights with strict=False.
-        convInit (in_channels mismatch 1→2) and conv_final (out_channels mismatch)
-        are skipped and stay randomly initialized.
-        """
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-
-        if isinstance(checkpoint, dict):
-            for key in ("state_dict", "model", "model_state_dict", "net"):
-                if key in checkpoint:
-                    checkpoint = checkpoint[key]
-                    break
-
-        def strip_prefix(sd, prefix):
-            return {(k[len(prefix):] if k.startswith(prefix) else k): v for k, v in sd.items()}
-
-        for prefix in ("module.", "segresnet.", "model."):
-            if any(k.startswith(prefix) for k in checkpoint):
-                checkpoint = strip_prefix(checkpoint, prefix)
-
-        missing, unexpected = self.segresnet.load_state_dict(checkpoint, strict=False)
-
-        interior_missing = [k for k in missing if "convInit" not in k and "conv_final" not in k]
-        if interior_missing:
-            print(f"[SegResNet] Warning — missing interior keys: {interior_missing}")
-
-        print(
-            f"[SegResNet] Loaded pretrained weights from '{path}'. "
-            f"Skipped (channel mismatch): convInit, conv_final. "
-            f"Unexpected keys: {len(unexpected)}."
-        )
+        weights = torch.load(path, map_location="cpu", weights_only=False)
+        if "state_dict" in weights:
+            weights = weights["state_dict"]
+        self.swinunetr.load_from(weights=weights)
+        print(f"[SwinUNETR] Loaded pretrained encoder from '{path}'. Decoder initialised randomly.")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.segresnet(x)
+        return self.swinunetr(x)
 
     def save_checkpoint(self, path: str, epoch: int, optimizer_state: dict = None, **kwargs):
         checkpoint = {
